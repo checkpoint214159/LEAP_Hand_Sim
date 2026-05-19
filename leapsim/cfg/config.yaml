@@ -40,6 +40,7 @@ checkpoint: ''
 multi_gpu: False
 
 default_run_name: ${train.params.config.name}
+runs_dir: "runs"
 
 log_to_sheet: True
 sheet_name: "leap-hand-manip"
@@ -52,7 +53,7 @@ wandb_project: 'leap_sim'
 capture_video: False
 capture_video_freq: 183
 capture_video_len: 100
-force_render: True
+force_render: False
 
 # disables rendering
 headless: True

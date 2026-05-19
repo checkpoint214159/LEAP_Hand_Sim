@@ -59,6 +59,12 @@ def get_rlgames_env_creator(
         """
 
         # create native task and pass custom config
+        # currently only: isaacgym_task_map = {
+        #     "LeapHandGrasp": LeapHandGrasp,
+        #     "LeapHandRot": LeapHandRot,
+        # }
+        # TODO when we create new tasks add them there
+
         env = isaacgym_task_map[task_name](
             cfg=task_config,
             rl_device=rl_device,

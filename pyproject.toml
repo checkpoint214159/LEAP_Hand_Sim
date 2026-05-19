@@ -1,0 +1,28 @@
+[project]
+name = "leapsim"
+version = "1.0.0"
+description = "LEAP Hand simulation environment (IsaacGym)"
+readme = "README.md"
+requires-python = ">=3.8,<3.9"
+dependencies = [
+    "gym",
+    "torch",
+    "omegaconf",
+    "termcolor",
+    "hydra-core>=1.1",
+    "rl-games==1.5.2",
+    "pyvirtualdisplay",
+    "matplotlib",
+    "gitpython",
+    "numpy>=1.21,<1.24",
+    "wandb",
+    "isaacgym",
+    "moviepy>=1.0.3",
+]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]

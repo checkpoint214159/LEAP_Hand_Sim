@@ -10,6 +10,8 @@
 
 import os
 import sys
+from pathlib import Path
+from leapsim.utils.rerun_vis import RerunVisualizer, RerunFrame
 from attr import has
 from importlib_metadata import itertools
 import torch
@@ -28,28 +30,35 @@ from collections import deque
 class LeapHandRot(VecTaskRot):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture=None, force_render=None):
         self.cfg = cfg
+        self.env_cfg = self.cfg["env"]
         self.set_defaults()
         # before calling init in VecTask, need to do
         # 1. setup randomization
-        self._setup_domain_rand_cfg(cfg['env']['randomization'])
+        self._setup_domain_rand_cfg(self.env_cfg['randomization'])
         # 2. setup privileged information
-        self._setup_priv_option_cfg(cfg['env']['privInfo'])
+        self._setup_priv_option_cfg(self.env_cfg['privInfo'])
         # 3. setup object assets
-        self._setup_object_info(cfg['env']['object'])
+        self._setup_object_info(self.env_cfg['object'])
         # 4. setup reward
-        self._setup_reward_cfg(cfg['env']['reward'])
-        self.base_obj_scale = cfg['env']['baseObjScale']
-        self.save_init_pose = cfg['env']['genGrasps']
-        self.aggregate_mode = self.cfg['env']['aggregateMode']
+        self._setup_reward_cfg(self.env_cfg['reward'])
+        self.base_obj_scale = self.env_cfg['baseObjScale']
+        self.save_init_pose = self.env_cfg['genGrasps']
+        self.aggregate_mode = self.env_cfg['aggregateMode']
         self.up_axis = 'z'
-        self.reset_z_threshold = self.cfg['env']['reset_height_threshold']
-        self.grasp_cache_name = self.cfg['env']['grasp_cache_name']
+        self.reset_z_threshold = self.env_cfg['reset_height_threshold']
+        self.grasp_cache_name = self.env_cfg['grasp_cache_name']
         self.evaluate = self.cfg['on_evaluation']
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless)
 
-        self.debug_viz = self.cfg['env']['enableDebugVis']
-        self.max_episode_length = self.cfg['env']['episodeLength']
+        self.record_video = self.env_cfg.get('record_video', False)
+        if self.record_video:
+            import atexit
+            self._init_video_writer()
+            atexit.register(self._close_video_writer)
+
+        self.debug_viz = self.env_cfg['enableDebugVis']
+        self.max_episode_length = self.env_cfg['episodeLength']
         self.dt = self.sim_params.dt
         self.control_dt = self.sim_params.dt * self.control_freq_inv # This is the actual control frequency
 
@@ -92,10 +101,10 @@ class LeapHandRot(VecTaskRot):
         self.prev_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         self.cur_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
         # object apply random forces parameters
-        self.force_scale = self.cfg['env'].get('forceScale', 0.0)
-        self.random_force_prob_scalar = self.cfg['env'].get('randomForceProbScalar', 0.0)
-        self.force_decay = self.cfg['env'].get('forceDecay', 0.99)
-        self.force_decay_interval = self.cfg['env'].get('forceDecayInterval', 0.08)
+        self.force_scale = self.env_cfg.get('forceScale', 0.0)
+        self.random_force_prob_scalar = self.env_cfg.get('randomForceProbScalar', 0.0)
+        self.force_decay = self.env_cfg.get('forceDecay', 0.99)
+        self.force_decay_interval = self.env_cfg.get('forceDecayInterval', 0.08)
         self.force_decay = to_torch(self.force_decay, dtype=torch.float, device=self.device)
         self.rb_forces = torch.zeros((self.num_envs, self.num_bodies, 3), dtype=torch.float, device=self.device)    
         self.early_termination_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -136,25 +145,35 @@ class LeapHandRot(VecTaskRot):
         self.object_angvel_finite_diff_mean = torch.zeros(self.num_envs, device=self.device)
         self.setup_keyboard_events()
 
-        if "actions_mask" in self.cfg["env"]:
-            self.actions_mask = torch.tensor(self.cfg["env"]["actions_mask"], device=self.device)[None, :]
+        if "actions_mask" in self.env_cfg:
+            self.actions_mask = torch.tensor(self.env_cfg["actions_mask"], device=self.device)[None, :]
         else:
             self.actions_mask = torch.ones((1, self.num_leap_hand_dofs), device=self.device)
         
         if self.debug_viz:
             self.setup_plot()
 
-        if "debug" in self.cfg["env"]:
+        if "debug" in self.env_cfg:
             self.obs_list = []
             self.target_list = []
 
-            if "record" in self.cfg["env"]["debug"]:
-                self.record_duration = int(self.cfg["env"]["debug"]["record"]["duration"] / self.control_dt)
+            if "record" in self.env_cfg["debug"]:
+                self.record_duration = int(self.env_cfg["debug"]["record"]["duration"] / self.control_dt)
 
-            if "actions_file" in self.cfg["env"]["debug"]:
-                self.actions_list = torch.from_numpy(np.load(self.cfg["env"]["debug"]["actions_file"])).cuda()        
+            if "actions_file" in self.env_cfg["debug"]:
+                self.actions_list = torch.from_numpy(np.load(self.env_cfg["debug"]["actions_file"])).cuda()
                 self.record_duration = self.actions_list.shape[0]
-    
+
+        rr_cfg = self.env_cfg.get('rerun', {})
+        self._rr_env_idx = int(rr_cfg.get('env_idx', 0))
+        self._rerun_vis: RerunVisualizer = None
+        if rr_cfg.get('enabled', False):
+            hand_handle = self.gym.find_actor_handle(self.envs[0], 'hand')
+            link_names = self.gym.get_actor_rigid_body_names(self.envs[0], hand_handle)
+            asset_root = Path(__file__).parent.parent.parent
+            urdf_path = asset_root / self.env_cfg['asset']['handAsset']
+            self._rerun_vis = RerunVisualizer(rr_cfg, urdf_path, link_names)
+
     def set_camera(self, position, lookat):
         """ 
         Set camera position and direction
@@ -213,10 +232,10 @@ class LeapHandRot(VecTaskRot):
             self.viewer, gymapi.KEY_RIGHT_BRACKET, "next_id")
 
     def resample_randomizations(self, env_ids):
-        if "joint_noise" not in self.cfg["env"]["randomization"]:
+        if "joint_noise" not in self.env_cfg["randomization"]:
             return
 
-        self.joint_noise_cfg = self.cfg["env"]["randomization"]["joint_noise"]
+        self.joint_noise_cfg = self.env_cfg["randomization"]["joint_noise"]
 
         if env_ids is None:
             self.joint_noise_iid_scale = torch.zeros((self.num_envs, self.num_leap_hand_dofs), device=self.device)
@@ -259,58 +278,68 @@ class LeapHandRot(VecTaskRot):
         self.fig.canvas.blit(self.fig.bbox)
 
     def set_defaults(self):
-        if "include_pd_gains" not in self.cfg["env"]:
-            self.cfg["env"]["include_pd_gains"] = False
+        if "record_video" not in self.env_cfg:
+            self.env_cfg["record_video"] = False
+        if "video_dir" not in self.env_cfg:
+            self.env_cfg["video_dir"] = "videos"
+        if self.env_cfg["record_video"]:
+            # Env.__init__ reads cfg["enableCameraSensors"] (top-level, not cfg["env"])
+            # to decide whether to force graphics_device_id to -1.  Set it here so the
+            # graphics device stays valid when we need camera sensors.
+            self.cfg["enableCameraSensors"] = True
 
-        if "include_friction_coefficient" not in self.cfg["env"]:
-            self.cfg["env"]["include_friction_coefficient"] = False
+        if "include_pd_gains" not in self.env_cfg:
+            self.env_cfg["include_pd_gains"] = False
 
-        if "include_obj_scales" not in self.cfg["env"]:
-            self.cfg["env"]["include_obj_scales"] = False
+        if "include_friction_coefficient" not in self.env_cfg:
+            self.env_cfg["include_friction_coefficient"] = False
 
-        if "leap_hand_start_z" not in self.cfg["env"]:
-            self.cfg["env"]["leap_hand_start_z"] = 0.5
+        if "include_obj_scales" not in self.env_cfg:
+            self.env_cfg["include_obj_scales"] = False
+
+        if "leap_hand_start_z" not in self.env_cfg:
+            self.env_cfg["leap_hand_start_z"] = 0.5
         
-        if "grasp_dof_search_radius" not in self.cfg["env"]:
-            self.cfg["env"]["grasp_dof_search_radius"] = 0.25
+        if "grasp_dof_search_radius" not in self.env_cfg:
+            self.env_cfg["grasp_dof_search_radius"] = 0.25
 
-        if "obs_mask" not in self.cfg["env"]:
-            self.cfg["env"]["obs_mask"] = None
+        if "obs_mask" not in self.env_cfg:
+            self.env_cfg["obs_mask"] = None
 
-        if "include_targets" not in self.cfg["env"]:
-            self.cfg["env"]["include_targets"] = True
+        if "include_targets" not in self.env_cfg:
+            self.env_cfg["include_targets"] = True
         
-        if "include_obj_pose" not in self.cfg["env"]:
-            self.cfg["env"]["include_obj_pose"] = False
+        if "include_obj_pose" not in self.env_cfg:
+            self.env_cfg["include_obj_pose"] = False
 
-        if "include_history" not in self.cfg["env"]:
-            self.cfg["env"]["include_history"] = True
+        if "include_history" not in self.env_cfg:
+            self.env_cfg["include_history"] = True
 
-        if "joint_limits" not in self.cfg["env"]["randomization"]:
-            self.cfg["env"]["randomization"]["joint_limits"] = 0
+        if "joint_limits" not in self.env_cfg["randomization"]:
+            self.env_cfg["randomization"]["joint_limits"] = 0
 
-        if "mask_body_collision" not in self.cfg["env"]:
-            self.cfg["env"]["mask_body_collision"] = {}        
+        if "mask_body_collision" not in self.env_cfg:
+            self.env_cfg["mask_body_collision"] = {}        
     
-        if "disable_actions" not in self.cfg["env"]:
-            self.cfg["env"]["disable_actions"] = False
+        if "disable_actions" not in self.env_cfg:
+            self.env_cfg["disable_actions"] = False
 
-        if "disable_gravity" not in self.cfg["env"]:
-            self.cfg["env"]["disable_gravity"] = False
+        if "disable_gravity" not in self.env_cfg:
+            self.env_cfg["disable_gravity"] = False
 
-        if "disable_object_collision" not in self.cfg["env"]:
-            self.cfg["env"]["disable_object_collision"] = False
+        if "disable_object_collision" not in self.env_cfg:
+            self.env_cfg["disable_object_collision"] = False
 
-        if "disable_resets" not in self.cfg["env"]:
-            self.cfg["env"]["disable_resets"] = False
+        if "disable_resets" not in self.env_cfg:
+            self.env_cfg["disable_resets"] = False
 
-        if "disable_self_collision" not in self.cfg["env"]:
-            self.cfg["env"]["disable_self_collision"] = False
+        if "disable_self_collision" not in self.env_cfg:
+            self.env_cfg["disable_self_collision"] = False
 
-        if "rotation_axis" not in self.cfg["env"]:
+        if "rotation_axis" not in self.env_cfg:
             self.rotation_axis = torch.tensor([0., 0., 1.])
         else:
-            self.rotation_axis = torch.tensor(self.cfg["env"]["rotation_axis"])
+            self.rotation_axis = torch.tensor(self.env_cfg["rotation_axis"])
 
         # Multiple rigid shapes correspond to a rigid body, the indices can be found using get_asset_rigid_body_shape_indices
         self.body_shape_indices = [ 
@@ -351,8 +380,8 @@ class LeapHandRot(VecTaskRot):
             self.leap_hand_dof_lower_limits.append(leap_hand_dof_props['lower'][i])
             self.leap_hand_dof_upper_limits.append(leap_hand_dof_props['upper'][i])
             leap_hand_dof_props['effort'][i] = 0.5
-            leap_hand_dof_props['stiffness'][i] = self.cfg['env']['controller']['pgain']
-            leap_hand_dof_props['damping'][i] = self.cfg['env']['controller']['dgain']
+            leap_hand_dof_props['stiffness'][i] = self.env_cfg['controller']['pgain']
+            leap_hand_dof_props['damping'][i] = self.env_cfg['controller']['dgain']
             leap_hand_dof_props['friction'][i] = 0.01
             leap_hand_dof_props['armature'][i] = 0.001
 
@@ -360,9 +389,9 @@ class LeapHandRot(VecTaskRot):
         self.leap_hand_dof_upper_limits = to_torch(self.leap_hand_dof_upper_limits, device=self.device)
 
         self.leap_hand_dof_lower_limits = self.leap_hand_dof_lower_limits.repeat((self.num_envs, 1))  
-        self.leap_hand_dof_lower_limits += (2 * torch.rand_like(self.leap_hand_dof_lower_limits) - 1) * self.cfg["env"]["randomization"]["joint_limits"]
+        self.leap_hand_dof_lower_limits += (2 * torch.rand_like(self.leap_hand_dof_lower_limits) - 1) * self.env_cfg["randomization"]["joint_limits"]
         self.leap_hand_dof_upper_limits = self.leap_hand_dof_upper_limits.repeat((self.num_envs, 1))
-        self.leap_hand_dof_upper_limits += (2 * torch.rand_like(self.leap_hand_dof_upper_limits) - 1) * self.cfg["env"]["randomization"]["joint_limits"]
+        self.leap_hand_dof_upper_limits += (2 * torch.rand_like(self.leap_hand_dof_upper_limits) - 1) * self.env_cfg["randomization"]["joint_limits"]
 
         hand_pose, obj_pose = self._init_object_pose()
 
@@ -402,7 +431,7 @@ class LeapHandRot(VecTaskRot):
             object_type_id = np.random.choice(len(self.object_type_list), p=self.object_type_prob)
             object_asset = self.object_asset_list[object_type_id]
 
-            if self.cfg["env"]["disable_object_collision"]:
+            if self.env_cfg["disable_object_collision"]:
                 collision_group = -(i+2)
             else:
                 collision_group = i
@@ -422,8 +451,8 @@ class LeapHandRot(VecTaskRot):
                 num_scales = len(self.randomize_scale_list)
                 obj_scale = np.random.uniform(self.randomize_scale_list[i % num_scales] - 0.025, self.randomize_scale_list[i % num_scales] + 0.025)
                 
-                if "randomize_scale_factor" in self.cfg["env"]:
-                    obj_scale *= np.random.uniform(*self.cfg["env"]["randomize_scale_factor"])
+                if "randomize_scale_factor" in self.env_cfg:
+                    obj_scale *= np.random.uniform(*self.env_cfg["randomize_scale_factor"])
                 
                 self.obj_scales.append(obj_scale)
             self.gym.set_actor_scale(env_ptr, object_handle, obj_scale)
@@ -463,6 +492,19 @@ class LeapHandRot(VecTaskRot):
         self.object_rb_handles = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
         self.hand_indices = to_torch(self.hand_indices, dtype=torch.long, device=self.device)
         self.object_indices = to_torch(self.object_indices, dtype=torch.long, device=self.device)
+
+        if self.env_cfg.get('record_video', False):
+            cam_props = gymapi.CameraProperties()
+            cam_props.width = 640
+            cam_props.height = 480
+            self.cam_handle = self.gym.create_camera_sensor(self.envs[0], cam_props)
+            # Env 0: hand base at (0, 0, 0.5), object at ~(−0.03, 0.04, 0.57).
+            # Camera sits to the side and slightly above, looking at the object centre.
+            self.gym.set_camera_location(
+                self.cam_handle, self.envs[0],
+                gymapi.Vec3(0.5, 0.0, 0.9),
+                gymapi.Vec3(0.0, 0.0, 0.58),
+            )
     
     def reset_idx(self, env_ids):
         if self.randomize_mass:
@@ -502,8 +544,8 @@ class LeapHandRot(VecTaskRot):
             obj_scale = self.randomize_scale_list[n_s]
             scale_key = str(obj_scale)
             
-            if "sampled_pose_idx" in self.cfg["env"]:
-                sampled_pose_idx = np.ones(len(s_ids), dtype=np.int32) * self.cfg["env"]["sampled_pose_idx"]
+            if "sampled_pose_idx" in self.env_cfg:
+                sampled_pose_idx = np.ones(len(s_ids), dtype=np.int32) * self.env_cfg["sampled_pose_idx"]
             else:
                 sampled_pose_idx = np.random.randint(self.saved_grasping_states[scale_key].shape[0], size=len(s_ids))
             
@@ -528,7 +570,7 @@ class LeapHandRot(VecTaskRot):
         self.object_angvel_finite_diff_ep_buf.extend(list(self.object_angvel_finite_diff_mean[env_ids][mask]))
         self.object_angvel_finite_diff_mean[env_ids] = 0
 
-        if "print_object_angvel" in self.cfg["env"] and len(self.object_angvel_finite_diff_ep_buf) > 0:
+        if "print_object_angvel" in self.env_cfg and len(self.object_angvel_finite_diff_ep_buf) > 0:
             print("mean object angvel: ", sum(self.object_angvel_finite_diff_ep_buf) / len(self.object_angvel_finite_diff_ep_buf))
 
         self.progress_buf[env_ids] = 0
@@ -539,7 +581,7 @@ class LeapHandRot(VecTaskRot):
     def get_joint_noise(self):
         tensor = torch.zeros_like(self.leap_hand_dof_pos)
 
-        if "joint_noise" not in self.cfg["env"]["randomization"]:
+        if "joint_noise" not in self.env_cfg["randomization"]:
             return tensor
 
         if not self.joint_noise_cfg["add_noise"]:
@@ -590,14 +632,14 @@ class LeapHandRot(VecTaskRot):
                 self.target_list = torch.stack(self.target_list, dim=0)
                 self.target_list = self.target_list.cpu().numpy()
 
-                if "actions_file" in self.cfg["env"]["debug"]:
-                    actions_file = os.path.basename(self.cfg["env"]["debug"]["actions_file"])
-                    folder = os.path.dirname(self.cfg["env"]["debug"]["actions_file"])
+                if "actions_file" in self.env_cfg["debug"]:
+                    actions_file = os.path.basename(self.env_cfg["debug"]["actions_file"])
+                    folder = os.path.dirname(self.env_cfg["debug"]["actions_file"])
                     suffix = "_".join(actions_file.split("_")[1:])
                     joints_file = os.path.join(folder, "joints_sim_{}".format(suffix)) 
                     target_file = os.path.join(folder, "targets_sim_{}".format(suffix))
                 else:
-                    suffix = self.cfg["env"]["debug"]["record"]["suffix"]
+                    suffix = self.env_cfg["debug"]["record"]["suffix"]
                     joints_file = "debug/joints_sim_{}.npy".format(suffix)
                     target_file = "debug/targets_sim_{}.npy".format(suffix)
 
@@ -607,39 +649,39 @@ class LeapHandRot(VecTaskRot):
 
         cur_tar_buf = self.cur_targets[:, None]
         
-        if self.cfg["env"]["include_targets"]:
+        if self.env_cfg["include_targets"]:
             cur_obs_buf = torch.cat([cur_obs_buf, cur_tar_buf], dim=-1)
 
-        if self.cfg["env"]["include_obj_pose"]:
+        if self.env_cfg["include_obj_pose"]:
             cur_obs_buf = torch.cat([
                 cur_obs_buf, 
                 self.object_pos.unsqueeze(1), 
                 self.object_rpy.unsqueeze(1)
             ], dim=-1)
 
-        if self.cfg["env"]["include_obj_scales"]:
+        if self.env_cfg["include_obj_scales"]:
             cur_obs_buf = torch.cat([
                 cur_obs_buf, 
                 self.obj_scales.unsqueeze(1).unsqueeze(1), 
             ], dim=-1)
         
-        if self.cfg["env"]["include_pd_gains"]:
+        if self.env_cfg["include_pd_gains"]:
             cur_obs_buf = torch.cat([
                 cur_obs_buf, 
                 self.p_gain.unsqueeze(1), 
                 self.d_gain.unsqueeze(1)
             ], dim=-1)
         
-        if self.cfg["env"]["include_friction_coefficient"]:
+        if self.env_cfg["include_friction_coefficient"]:
             cur_obs_buf = torch.cat([
                 cur_obs_buf,
                 self.object_friction_buf.unsqueeze(1).unsqueeze(1)
             ], dim=-1)
 
-        if "phase_period" in self.cfg["env"]:
+        if "phase_period" in self.env_cfg:
             cur_obs_buf = torch.cat([cur_obs_buf, self.phase[:, None]], dim=-1)
 
-        if self.cfg["env"]["include_history"]:
+        if self.env_cfg["include_history"]:
             at_reset_env_ids = self.at_reset_buf.nonzero(as_tuple=False).squeeze(-1)
             self.obs_buf_lag_history[:] = torch.cat([prev_obs_buf, cur_obs_buf], dim=1)
 
@@ -649,7 +691,7 @@ class LeapHandRot(VecTaskRot):
                 self.leap_hand_dof_upper_limits[at_reset_env_ids]
             ).clone().unsqueeze(1)
 
-            if self.cfg["env"]["include_targets"]:
+            if self.env_cfg["include_targets"]:
                 self.obs_buf_lag_history[at_reset_env_ids, :, 16:32] = self.leap_hand_dof_pos[at_reset_env_ids].unsqueeze(1)
             
             t_buf = (self.obs_buf_lag_history[:, -3:].reshape(self.num_envs, -1)).clone() # attach three timesteps of history
@@ -661,8 +703,8 @@ class LeapHandRot(VecTaskRot):
         else:
             self.obs_buf = cur_obs_buf.clone().squeeze(1)
 
-        if self.cfg["env"]["obs_mask"] is not None:
-            self.obs_buf = self.obs_buf * torch.tensor(self.cfg["env"]["obs_mask"], device=self.device)[None, :]
+        if self.env_cfg["obs_mask"] is not None:
+            self.obs_buf = self.obs_buf * torch.tensor(self.env_cfg["obs_mask"], device=self.device)[None, :]
 
     def compute_reward(self, actions):
         self.rot_axis_buf[:, -1] = -1
@@ -685,15 +727,15 @@ class LeapHandRot(VecTaskRot):
             work_penalty, work_pscale,
         )
 
-        if "additional_rewards" in self.cfg["env"]:
-            for reward_name, reward_scale in self.cfg["env"]["additional_rewards"].items():
+        if "additional_rewards" in self.env_cfg:
+            for reward_name, reward_scale in self.env_cfg["additional_rewards"].items():
                 reward_value = eval("self.reward_{}()".format(reward_name)) * reward_scale
                 self.extras["reward_{}".format(reward_name)] = reward_value.mean()
                 self.rew_buf += reward_value
 
         self.reset_buf[:] = self.check_termination(self.object_pos)
         
-        if self.cfg["env"]["disable_resets"]:
+        if self.env_cfg["disable_resets"]:
             # only consider ep length and early termination
             self.reset_buf = self.progress_buf >= self.max_episode_length 
 
@@ -754,6 +796,68 @@ class LeapHandRot(VecTaskRot):
                 self.gym.add_lines(self.viewer, self.envs[i], 1, [p0[0], p0[1], p0[2], objectz[0], objectz[1], objectz[2]], [0.1, 0.1, 0.85])
                 
             self.plot_callback()
+
+        if self.record_video:
+            self._capture_frame()
+
+        if self._rerun_vis is not None:
+            idx = self._rr_env_idx
+            rb = self.rigid_body_states[idx, :self.num_leap_hand_bodies].cpu().numpy()
+            self._rerun_vis.tick(RerunFrame(
+                rb_states=rb,
+                obj_pos=self.object_pos[idx].cpu().numpy(),
+                obj_rot=self.object_rot[idx].cpu().numpy(),
+                targets=self.cur_targets[idx, :self.num_leap_hand_dofs].cpu().numpy(),
+                dof_pos=self.leap_hand_dof_pos[idx].cpu().numpy(),
+                reset=bool(self.reset_buf[idx]),
+                linvel_mag=float(self.object_linvel[idx].norm()),
+                angvel_mag=float(self.object_angvel[idx].norm()),
+            ))
+
+    def _init_video_writer(self):
+        """
+        NOTE: this may still be broken, we did not have sufficient time to test it out.
+        in the end i may resort to another third party package like rerun.
+        """
+        import subprocess
+        import shutil
+        import datetime
+        import os
+        if shutil.which('ffmpeg') is None:
+            print('[Video] ffmpeg not found — disabling video capture')
+            self.record_video = False
+            return
+        video_dir = self.env_cfg['video_dir']
+        os.makedirs(video_dir, exist_ok=True)
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+        task_name = self.cfg.get('name', 'task')
+        self._video_path = os.path.join(video_dir, f'{task_name}_{timestamp}.mp4')
+        self._video_proc = subprocess.Popen(
+            ['ffmpeg', '-y',
+             '-f', 'rawvideo', '-vcodec', 'rawvideo',
+             '-s', '640x480', '-pix_fmt', 'rgba', '-r', '20',
+             '-i', 'pipe:',
+             '-vcodec', 'libx264', '-pix_fmt', 'yuv420p', self._video_path],
+            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        self._video_frame_count = 0
+        print(f'[Video] Recording to {self._video_path}')
+
+    def _capture_frame(self):
+        self.gym.render_all_camera_sensors(self.sim)
+        frame = self.gym.get_camera_image(
+            self.sim, self.envs[0], self.cam_handle, gymapi.IMAGE_COLOR
+        )
+        self._video_proc.stdin.write(frame.tobytes())
+        self._video_frame_count += 1
+
+    def _close_video_writer(self):
+        if hasattr(self, '_video_proc') and self._video_proc is not None:
+            self._video_proc.stdin.close()
+            self._video_proc.wait()
+            print(f'[Video] Saved {self._video_frame_count} frames → {self._video_path}')
+            self._video_proc = None
+
 
     def plot_callback(self):
         self.fig.canvas.restore_region(self.bg)
@@ -830,8 +934,8 @@ class LeapHandRot(VecTaskRot):
             self.real_to_sim_indices.append(self.real_dof_order.index(x))
         
         import pdb; pdb.set_trace()
-        assert(self.sim_to_real_indices == self.cfg["env"]["sim_to_real_indices"])
-        assert(self.real_to_sim_indices == self.cfg["env"]["real_to_sim_indices"])
+        assert(self.sim_to_real_indices == self.env_cfg["sim_to_real_indices"])
+        assert(self.real_to_sim_indices == self.env_cfg["real_to_sim_indices"])
 
     def real_to_sim(self, values):
         if not hasattr(self, "sim_dof_order"):
@@ -848,7 +952,7 @@ class LeapHandRot(VecTaskRot):
     def update_low_level_control(self):
         previous_dof_pos = self.leap_hand_dof_pos.clone()
         self._refresh_gym()      
-        if os.getenv("RVIZ") is None and not self.cfg["env"]["disable_actions"]:
+        if os.getenv("RVIZ") is None and not self.env_cfg["disable_actions"]:
             self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.cur_targets))
 
     def check_termination(self, object_pos):
@@ -884,8 +988,8 @@ class LeapHandRot(VecTaskRot):
             self.object_angvel_finite_diff /= (self.control_dt * delta_counter)
             self.previous_object_rot = self.object_rot.clone() 
 
-        if "phase_period" in self.cfg["env"]:
-            omega = 2 * math.pi / self.cfg["env"]["phase_period"]
+        if "phase_period" in self.env_cfg:
+            omega = 2 * math.pi / self.env_cfg["phase_period"]
             phase_angle = (self.progress_buf - 1) * self.control_dt * omega
             self.phase = torch.stack([torch.sin(phase_angle), torch.cos(phase_angle)], dim=-1)
 
@@ -967,7 +1071,7 @@ class LeapHandRot(VecTaskRot):
     def _create_object_asset(self):
         # object file to asset
         asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../')
-        hand_asset_file = self.cfg['env']['asset']['handAsset']
+        hand_asset_file = self.env_cfg['asset']['handAsset']
         # load hand asset
         hand_asset_options = gymapi.AssetOptions()
         hand_asset_options.flip_visual_attachments = False
@@ -989,7 +1093,7 @@ class LeapHandRot(VecTaskRot):
         if "leap_hand" in hand_asset_file:
             rsp = self.gym.get_asset_rigid_shape_properties(self.hand_asset)   
 
-            for i, (_, body_group) in enumerate(self.cfg["env"]["mask_body_collision"].items()):
+            for i, (_, body_group) in enumerate(self.env_cfg["mask_body_collision"].items()):
                 filter_value = 2 ** i
 
                 for body_idx in body_group:
@@ -998,7 +1102,7 @@ class LeapHandRot(VecTaskRot):
                     for idx in range(count):
                         rsp[idx + start].filter = rsp[idx + start].filter | filter_value 
 
-            if self.cfg["env"]["disable_self_collision"]: # Disable all collisions
+            if self.env_cfg["disable_self_collision"]: # Disable all collisions
                 for i in range(len(rsp)):
                     rsp[i].filter = 1
 
@@ -1010,7 +1114,7 @@ class LeapHandRot(VecTaskRot):
             object_asset_file = self.asset_files_dict[object_type]
             object_asset_options = gymapi.AssetOptions()
 
-            if self.cfg["env"]["disable_gravity"]:
+            if self.env_cfg["disable_gravity"]:
                 object_asset_options.disable_gravity = True
 
             object_asset = self.gym.load_asset(self.sim, asset_root, object_asset_file, object_asset_options)
@@ -1018,7 +1122,7 @@ class LeapHandRot(VecTaskRot):
 
     def _init_object_pose(self):
         leap_hand_start_pose = gymapi.Transform()
-        leap_hand_start_pose.p = gymapi.Vec3(0, 0, self.cfg["env"]["leap_hand_start_z"])
+        leap_hand_start_pose.p = gymapi.Vec3(0, 0, self.env_cfg["leap_hand_start_z"])
 
         leap_hand_start_pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), np.pi) 
         object_start_pose = gymapi.Transform()
@@ -1026,11 +1130,11 @@ class LeapHandRot(VecTaskRot):
         object_start_pose.p.x = leap_hand_start_pose.p.x
         pose_dx, pose_dy, pose_dz = -0.01, -0.04, 0.15
 
-        if "override_object_init_x" in self.cfg["env"]:
-            pose_dx = self.cfg["env"]["override_object_init_x"]
+        if "override_object_init_x" in self.env_cfg:
+            pose_dx = self.env_cfg["override_object_init_x"]
 
-        if "override_object_init_y" in self.cfg["env"]:
-            pose_dy = self.cfg["env"]["override_object_init_y"]
+        if "override_object_init_y" in self.env_cfg:
+            pose_dy = self.env_cfg["override_object_init_y"]
 
         object_start_pose.p.x = leap_hand_start_pose.p.x + pose_dx
         object_start_pose.p.y = leap_hand_start_pose.p.y + pose_dy
@@ -1047,14 +1151,14 @@ class LeapHandRot(VecTaskRot):
             object_z -= 0.02
         object_start_pose.p.z = object_z
 
-        if "override_object_init_z" in self.cfg["env"]:
-            object_start_pose.p.z = self.cfg["env"]["override_object_init_z"] 
+        if "override_object_init_z" in self.env_cfg:
+            object_start_pose.p.z = self.env_cfg["override_object_init_z"] 
 
         return leap_hand_start_pose, object_start_pose
 
     def reward_rotate_finite_diff(self):
-        min_angvel = self.cfg["env"]["reward"]["angvelClipMin"]
-        max_angvel = self.cfg["env"]["reward"]["angvelClipMax"]
+        min_angvel = self.env_cfg["reward"]["angvelClipMin"]
+        max_angvel = self.env_cfg["reward"]["angvelClipMax"]
 
         reward = torch.clip(self.object_angvel_finite_diff[:, 2], min=min_angvel, max=max_angvel)
 

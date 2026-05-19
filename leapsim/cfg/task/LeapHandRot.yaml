@@ -16,6 +16,16 @@ physics_engine: ${..physics_engine}
 on_evaluation: False
 
 env:
+  record_video: False
+  video_dir: 'runs/videos'
+
+  rerun:
+    enabled: False
+    fidelity: mesh                # mesh = full STL geometry; minimal = boxes only
+    window_length_steps: 400      # control steps per recording window (400 = 20s @ 20Hz)
+    record_every_n_steps: 4000    # open a new window every N steps (~200s sim time)
+    env_idx: 0
+    output_dir: "."               # placeholder; train.py overwrites with experiment_dir/rerun
   # environment basic
   numEnvs: ${resolve_default:16384,${...num_envs}}
   numObservations: 102

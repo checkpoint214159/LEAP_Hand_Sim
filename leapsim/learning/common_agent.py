@@ -14,7 +14,7 @@ import copy
 from datetime import datetime
 from gym import spaces
 import numpy as np
-import os
+from pathlib import Path
 import time
 import yaml
 
@@ -49,10 +49,6 @@ class CommonAgent(a2c_continuous.A2CAgent):
         self.bounds_loss_coef = config.get('bounds_loss_coef', None)
         self.clip_actions = config.get('clip_actions', True)
 
-        self.network_path = config.get('network_path', "./runs")
-        self.network_path = os.path.join(self.network_path, self.config['name'])
-        self.network_path = os.path.join(self.network_path, 'nn')
-        
         net_config = self._build_net_config()
         self.model = self.network.build(net_config)
         self.model.to(self.ppo_device)
@@ -104,7 +100,7 @@ class CommonAgent(a2c_continuous.A2CAgent):
         self.obs = self.env_reset()
         self.curr_frames = self.batch_size_envs
 
-        self.model_output_file = os.path.join(self.network_path, self.config['name'])
+        self.model_output_file = Path(self.nn_dir) / self.config['name']
 
         if self.multi_gpu:
             self.hvd.setup_algo(self)
@@ -155,10 +151,10 @@ class CommonAgent(a2c_continuous.A2CAgent):
 
                 if self.save_freq > 0:
                     if (epoch_num % self.save_freq == 0):
-                        self.save(self.model_output_file + "_" + str(epoch_num))
+                        self.save(str(self.model_output_file) + "_" + str(epoch_num))
 
                 if epoch_num > self.max_epochs:
-                    self.save(self.model_output_file)
+                    self.save(str(self.model_output_file))
                     print('MAX EPOCHS NUM!')
                     return self.last_mean_rewards, epoch_num
 

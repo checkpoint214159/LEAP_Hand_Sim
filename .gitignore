@@ -6,3 +6,5 @@ leapsim.egg-info
 isaacgym/
 .vscode
 *.pyc   
+*runs*
+*.log

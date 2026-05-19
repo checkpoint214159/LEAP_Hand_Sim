@@ -14,40 +14,35 @@ import datetime
 import isaacgym
 
 import os
+from pathlib import Path
 import hydra
-import yaml
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import to_absolute_path
 import gym
-import sys
-import os
-import rl_games
-import inspect
 
 from leapsim.utils.reformat import omegaconf_to_dict, print_dict
 
-from leapsim.utils.utils import set_np_formatting, set_seed, get_current_commit_hash
+from leapsim.utils.utils import set_np_formatting, set_seed
 
-## OmegaConf & Hydra Config
+from leapsim.utils.rlgames_utils import RLGPUEnv, RLGPUAlgoObserver
+from rl_games.common import env_configurations, vecenv
+from rl_games.torch_runner import Runner
+from rl_games.algos_torch import model_builder
+from leapsim.learning import amp_continuous
+from leapsim.learning import amp_players
+from leapsim.learning import amp_models
+from leapsim.learning import amp_network_builder
+import leapsim
+import shutil
+
 
 # Resolvers used in hydra configs (see https://omegaconf.readthedocs.io/en/2.1_branch/usage.html#resolvers)
 @hydra.main(config_name="config", config_path="./cfg")
-def launch_rlg_hydra(cfg: DictConfig):
-    from leapsim.utils.rlgames_utils import RLGPUEnv, RLGPUAlgoObserver, get_rlgames_env_creator
-    from rl_games.common import env_configurations, vecenv
-    from rl_games.torch_runner import Runner
-    from rl_games.algos_torch import model_builder
-    from leapsim.learning import amp_continuous
-    from leapsim.learning import amp_players
-    from leapsim.learning import amp_models
-    from leapsim.learning import amp_network_builder
-    import leapsim
-    import shutil
+def main_with_cfg_overrides(cfg: DictConfig):
+
 
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"{cfg.default_run_name}_{time_str}"
-    run_url = None
-
     # ensure checkpoints can be specified as relative paths
     if cfg.checkpoint:
         cfg.checkpoint = to_absolute_path(cfg.checkpoint)
@@ -72,7 +67,7 @@ def launch_rlg_hydra(cfg: DictConfig):
         # Make sure to install WandB if you actually use this.
         import wandb
 
-        run = wandb.init(
+        wandb.init(
             project=cfg.wandb_project,
             group=cfg.wandb_group,
             entity=cfg.wandb_entity,
@@ -81,11 +76,15 @@ def launch_rlg_hydra(cfg: DictConfig):
             resume="allow",
         )
 
-        # if wandb is activated use wandb assigned run name
         run_name = wandb.run.name
-        run_url = wandb.run.url
     
-    cfg.train.params.config.full_experiment_name = run_name # This name is used to save checkpoints
+    runs_dir = Path(to_absolute_path(cfg.runs_dir))
+    experiment_dir = runs_dir / run_name
+
+    cfg.train.params.config.full_experiment_name = run_name
+
+    if cfg.task.env.rerun.enabled:
+        cfg.task.env.rerun.output_dir = str(experiment_dir / "rerun")
 
     def create_env_thunk(**kwargs):
         envs = leapsim.make(
@@ -138,19 +137,25 @@ def launch_rlg_hydra(cfg: DictConfig):
     runner.load(rlg_config_dict)
     runner.reset()
 
-    # dump config dict
-    experiment_dir = os.path.join('runs', run_name)
-    os.makedirs(experiment_dir, exist_ok=True)
-    shutil.copyfile("cfg/task/LeapHandRot.yaml", os.path.join(experiment_dir, "LeapHandRot.yaml"))
-    shutil.copyfile("cfg/train/LeapHandRotPPO.yaml", os.path.join(experiment_dir, "LeapHandRotPPO.yaml"))
+    # snapshot configs alongside the run for reproducibility
+    leapsim_cfg_dir = Path(__file__).parent / "cfg"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(
+        leapsim_cfg_dir / "task" / f"{cfg.task_name}.yaml",
+        experiment_dir / f"{cfg.task_name}.yaml",
+    )
+    shutil.copyfile(
+        leapsim_cfg_dir / "train" / f"{cfg.task_name}PPO.yaml",
+        experiment_dir / f"{cfg.task_name}PPO.yaml",
+    )
 
-    with open(os.path.join(experiment_dir, 'config.yaml'), 'w') as f:
+    with open(experiment_dir / "config.yaml", "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
 
     if cfg.wandb_activate and rank == 0:
-        wandb.save(os.path.join(experiment_dir, 'config.yaml'))
-        wandb.save(os.path.join(experiment_dir, 'LeapHandRot.yaml'))
-        wandb.save(os.path.join(experiment_dir, 'LeapHandRotPPO.yaml'))
+        wandb.save(str(experiment_dir / "config.yaml"))
+        wandb.save(str(experiment_dir / f"{cfg.task_name}.yaml"))
+        wandb.save(str(experiment_dir / f"{cfg.task_name}PPO.yaml"))
 
     if cfg.multi_gpu:
         import horovod.torch as hvd
@@ -172,4 +177,4 @@ def launch_rlg_hydra(cfg: DictConfig):
         wandb.finish()
 
 if __name__ == "__main__":
-    launch_rlg_hydra()
+    main_with_cfg_overrides()
