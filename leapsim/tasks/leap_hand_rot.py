@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 from leapsim.utils.rerun_vis import RerunVisualizer, RerunFrame
+from leapsim.utils.env_setup import create_leap_assets, init_object_pose
 from attr import has
 from importlib_metadata import itertools
 import torch
@@ -29,17 +30,13 @@ from collections import deque
 
 class LeapHandRot(VecTaskRot):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture=None, force_render=None):
+        # ── 1. Pre-super-init: config must be parsed before VecTask.__init__ ─────
         self.cfg = cfg
         self.env_cfg = self.cfg["env"]
         self.set_defaults()
-        # before calling init in VecTask, need to do
-        # 1. setup randomization
         self._setup_domain_rand_cfg(self.env_cfg['randomization'])
-        # 2. setup privileged information
         self._setup_priv_option_cfg(self.env_cfg['privInfo'])
-        # 3. setup object assets
         self._setup_object_info(self.env_cfg['object'])
-        # 4. setup reward
         self._setup_reward_cfg(self.env_cfg['reward'])
         self.base_obj_scale = self.env_cfg['baseObjScale']
         self.save_init_pose = self.env_cfg['genGrasps']
@@ -49,8 +46,10 @@ class LeapHandRot(VecTaskRot):
         self.grasp_cache_name = self.env_cfg['grasp_cache_name']
         self.evaluate = self.cfg['on_evaluation']
 
+        # ── 2. Sim creation (calls _create_envs internally) ──────────────────────
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless)
 
+        # ── 3. Post-super-init: viewer, timing ───────────────────────────────────
         self.record_video = self.env_cfg.get('record_video', False)
         if self.record_video:
             import atexit
@@ -60,55 +59,65 @@ class LeapHandRot(VecTaskRot):
         self.debug_viz = self.env_cfg['enableDebugVis']
         self.max_episode_length = self.env_cfg['episodeLength']
         self.dt = self.sim_params.dt
-        self.control_dt = self.sim_params.dt * self.control_freq_inv # This is the actual control frequency
+        self.control_dt = self.sim_params.dt * self.control_freq_inv
 
         if self.viewer:
             self.default_cam_pos = gymapi.Vec3(0.0, 0.4, 1.5)
             self.default_cam_target = gymapi.Vec3(0.0, 0.0, 0.5)
             self.gym.viewer_camera_look_at(self.viewer, None, self.default_cam_pos, self.default_cam_target)
 
-        # get gym GPU state tensors
+        # ── 4. IsaacGym tensor acquisition ───────────────────────────────────────
         actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
-        dof_force_tensor = self.gym.acquire_dof_force_tensor(self.sim)
-        rigid_body_tensor = self.gym.acquire_rigid_body_state_tensor(self.sim)
-        net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
+        dof_state_tensor        = self.gym.acquire_dof_state_tensor(self.sim)
+        dof_force_tensor        = self.gym.acquire_dof_force_tensor(self.sim)
+        rigid_body_tensor       = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        net_contact_forces      = self.gym.acquire_net_contact_force_tensor(self.sim)
 
-        # create some wrapper tensors for different slices
-        self.leap_hand_default_dof_pos = torch.zeros(self.num_leap_hand_dofs, dtype=torch.float, device=self.device)
-        self.dof_state = gymtorch.wrap_tensor(dof_state_tensor)
-        self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)
-        self.leap_hand_dof_state = self.dof_state.view(self.num_envs, -1, 2)[:, :self.num_leap_hand_dofs]
-        self.leap_hand_dof_pos = self.leap_hand_dof_state[..., 0]
-        self.leap_hand_dof_vel = self.leap_hand_dof_state[..., 1]
-
-        self.object_rpy = torch.zeros((self.num_envs, 3), device=self.device)
-        self.object_angvel_finite_diff = torch.zeros((self.num_envs, 3), device=self.device)
-
-        self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_tensor).view(self.num_envs, -1, 13)
-        self.num_bodies = self.rigid_body_states.shape[1]
-
+        # Shared sim-level views (hand + object live here)
         self.root_state_tensor = gymtorch.wrap_tensor(actor_root_state_tensor).view(-1, 13)
-        self.torques = gymtorch.wrap_tensor(dof_force_tensor).view(-1, self.num_leap_hand_dofs)
+        self.dof_state         = gymtorch.wrap_tensor(dof_state_tensor)
+        self.rigid_body_states = gymtorch.wrap_tensor(rigid_body_tensor).view(self.num_envs, -1, 13)
+        self.contact_forces    = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3)
+        self.num_bodies        = self.rigid_body_states.shape[1]
 
-        self.global_counter = 0
+        # ── 5. Hand joint buffers ────────────────────────────────────────────────
+        self.leap_hand_default_dof_pos = torch.zeros(self.num_leap_hand_dofs, dtype=torch.float, device=self.device)
+        self.leap_hand_dof_state       = self.dof_state.view(self.num_envs, -1, 2)[:, :self.num_leap_hand_dofs]
+        self.leap_hand_dof_pos         = self.leap_hand_dof_state[..., 0]
+        self.leap_hand_dof_vel         = self.leap_hand_dof_state[..., 1]
+        self.torques                   = gymtorch.wrap_tensor(dof_force_tensor).view(-1, self.num_leap_hand_dofs)
+
+        self.global_counter      = 0
         self.prev_global_counter = 0
-
         self._refresh_gym()
-
         self.num_dofs = self.gym.get_sim_dof_count(self.sim) // self.num_envs
 
-        self.prev_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
-        self.cur_targets = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
-        # object apply random forces parameters
-        self.force_scale = self.env_cfg.get('forceScale', 0.0)
-        self.random_force_prob_scalar = self.env_cfg.get('randomForceProbScalar', 0.0)
-        self.force_decay = self.env_cfg.get('forceDecay', 0.99)
-        self.force_decay_interval = self.env_cfg.get('forceDecayInterval', 0.08)
-        self.force_decay = to_torch(self.force_decay, dtype=torch.float, device=self.device)
-        self.rb_forces = torch.zeros((self.num_envs, self.num_bodies, 3), dtype=torch.float, device=self.device)    
-        self.early_termination_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.prev_targets       = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+        self.cur_targets        = torch.zeros((self.num_envs, self.num_dofs), dtype=torch.float, device=self.device)
+        self.actions            = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
+        self.last_torques       = self.torques.clone()
+        self.dof_vel_finite_diff = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=torch.float)
+        self.init_pose_buf      = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=torch.float)
+        assert type(self.p_gain) in [int, float] and type(self.d_gain) in [int, float], 'assume p_gain and d_gain are only scalars'
+        self.p_gain = torch.ones((self.num_envs, self.num_actions), device=self.device, dtype=torch.float) * self.p_gain
+        self.d_gain = torch.ones((self.num_envs, self.num_actions), device=self.device, dtype=torch.float) * self.d_gain
 
+        # ── 6. Object state buffers ──────────────────────────────────────────────
+        self.object_rpy              = torch.zeros((self.num_envs, 3), device=self.device)
+        self.object_angvel_finite_diff = torch.zeros((self.num_envs, 3), device=self.device)
+        self.rot_axis_buf            = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
+        self.object_init_pose_buf    = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float)
+        self.previous_object_rot     = torch.zeros((self.num_envs, 4), device=self.device)
+
+        # ── 7. Random-force / perturbation buffers ───────────────────────────────
+        self.force_scale              = self.env_cfg.get('forceScale', 0.0)
+        self.random_force_prob_scalar = self.env_cfg.get('randomForceProbScalar', 0.0)
+        self.force_decay              = to_torch(self.env_cfg.get('forceDecay', 0.99), dtype=torch.float, device=self.device)
+        self.force_decay_interval     = self.env_cfg.get('forceDecayInterval', 0.08)
+        self.rb_forces                = torch.zeros((self.num_envs, self.num_bodies, 3), dtype=torch.float, device=self.device)
+        self.early_termination_buf    = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # ── 8. Grasp cache ───────────────────────────────────────────────────────
         if self.randomize_scale and self.scale_list_init:
             self.saved_grasping_states = {}
             for s in self.randomize_scale_list:
@@ -118,22 +127,10 @@ class LeapHandRot(VecTaskRot):
         else:
             assert self.save_init_pose
 
-        self.rot_axis_buf = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float)
+        self.resample_randomizations(None)
 
-        # useful buffers
-        self.init_pose_buf = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=torch.float)
-        self.object_init_pose_buf = torch.zeros((self.num_envs, 7), device=self.device, dtype=torch.float)
-        self.previous_object_rot = torch.zeros((self.num_envs, 4), device=self.device)
-        self.actions = torch.zeros((self.num_envs, self.num_actions), device=self.device, dtype=torch.float)
-        self.last_torques = self.torques.clone()
-        self.dof_vel_finite_diff = torch.zeros((self.num_envs, self.num_dofs), device=self.device, dtype=torch.float)
-        assert type(self.p_gain) in [int, float] and type(self.d_gain) in [int, float], 'assume p_gain and d_gain are only scalars'
-        self.p_gain = torch.ones((self.num_envs, self.num_actions), device=self.device, dtype=torch.float) * self.p_gain
-        self.d_gain = torch.ones((self.num_envs, self.num_actions), device=self.device, dtype=torch.float) * self.d_gain
-        self.resample_randomizations(None) 
-
-        # debug and understanding statistics
-        self.env_timeout_counter = to_torch(np.zeros((len(self.envs)))).long().to(self.device)  # max 10 (10000 envs)
+        # ── 9. Statistics / debug ────────────────────────────────────────────────
+        self.env_timeout_counter = to_torch(np.zeros((len(self.envs)))).long().to(self.device)
         self.stat_sum_rewards = 0
         self.stat_sum_rotate_rewards = 0
         self.stat_sum_episode_length = 0
@@ -142,28 +139,71 @@ class LeapHandRot(VecTaskRot):
         self.env_evaluated = 0
         self.max_evaluate_envs = 500000
         self.object_angvel_finite_diff_ep_buf = deque(maxlen=1000)
-        self.object_angvel_finite_diff_mean = torch.zeros(self.num_envs, device=self.device)
+        self.object_angvel_finite_diff_mean   = torch.zeros(self.num_envs, device=self.device)
         self.setup_keyboard_events()
 
         if "actions_mask" in self.env_cfg:
             self.actions_mask = torch.tensor(self.env_cfg["actions_mask"], device=self.device)[None, :]
         else:
             self.actions_mask = torch.ones((1, self.num_leap_hand_dofs), device=self.device)
-        
+
         if self.debug_viz:
             self.setup_plot()
 
         if "debug" in self.env_cfg:
             self.obs_list = []
             self.target_list = []
-
             if "record" in self.env_cfg["debug"]:
                 self.record_duration = int(self.env_cfg["debug"]["record"]["duration"] / self.control_dt)
-
             if "actions_file" in self.env_cfg["debug"]:
                 self.actions_list = torch.from_numpy(np.load(self.env_cfg["debug"]["actions_file"])).cuda()
                 self.record_duration = self.actions_list.shape[0]
 
+        # ── 10. Readable buffer inventory ─────────────────────────────────────────
+        # self.hand and self.obj alias the tensors above — use them as a map of
+        # what state this class owns without hunting through __init__.
+        # Runtime methods still use the self.* names; migrate incrementally.
+        import types
+        self.hand = types.SimpleNamespace(
+            # live views into IsaacGym DOF state tensor
+            dof_pos          = self.leap_hand_dof_pos,
+            dof_vel          = self.leap_hand_dof_vel,
+            dof_state        = self.leap_hand_dof_state,
+            torques          = self.torques,
+            # control
+            cur_targets      = self.cur_targets,
+            prev_targets     = self.prev_targets,
+            p_gain           = self.p_gain,
+            d_gain           = self.d_gain,
+            actions          = self.actions,
+            # limits / defaults
+            default_dof_pos  = self.leap_hand_default_dof_pos,
+            dof_lower_limits = self.leap_hand_dof_lower_limits,
+            dof_upper_limits = self.leap_hand_dof_upper_limits,
+            # misc
+            dof_vel_fd       = self.dof_vel_finite_diff,
+            last_torques     = self.last_torques,
+            rb_forces        = self.rb_forces,
+            init_pose        = self.init_pose_buf,
+        )
+        self.obj = types.SimpleNamespace(
+            # orientation tracking
+            rpy              = self.object_rpy,
+            angvel_fd        = self.object_angvel_finite_diff,
+            prev_rot         = self.previous_object_rot,
+            rot_axis         = self.rot_axis_buf,
+            # per-env randomisation state
+            scales           = self.obj_scales,
+            friction         = self.object_friction_buf,
+            # reset state
+            init_state       = self.object_init_state,
+            init_pose        = self.object_init_pose_buf,
+            # IsaacGym index maps
+            indices          = self.object_indices,
+            rb_handles       = self.object_rb_handles,
+        )
+
+        # ── 11. Rerun visualizer ──────────────────────────────────────────────────
         rr_cfg = self.env_cfg.get('rerun', {})
         self._rr_env_idx = int(rr_cfg.get('env_idx', 0))
         self._rerun_vis: RerunVisualizer = None
@@ -367,139 +407,130 @@ class LeapHandRot(VecTaskRot):
         lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         upper = gymapi.Vec3(spacing, spacing, spacing)
 
-        self._create_object_asset()
+        # ── Asset loading ─────────────────────────────────────────────────────
+        self.hand_asset, self.object_asset_list = create_leap_assets(
+            self.gym, self.sim, self.env_cfg,
+            self.body_shape_indices, self.object_type_list, self.asset_files_dict,
+        )
 
-        # set leap_hand dof properties
+        # ── DOF properties (limits + randomised PD gains) ─────────────────────
         self.num_leap_hand_dofs = self.gym.get_asset_dof_count(self.hand_asset)
         leap_hand_dof_props = self.gym.get_asset_dof_properties(self.hand_asset)
 
         self.leap_hand_dof_lower_limits = []
         self.leap_hand_dof_upper_limits = []
-
         for i in range(self.num_leap_hand_dofs):
             self.leap_hand_dof_lower_limits.append(leap_hand_dof_props['lower'][i])
             self.leap_hand_dof_upper_limits.append(leap_hand_dof_props['upper'][i])
-            leap_hand_dof_props['effort'][i] = 0.5
+            leap_hand_dof_props['effort'][i]    = 0.5
             leap_hand_dof_props['stiffness'][i] = self.env_cfg['controller']['pgain']
-            leap_hand_dof_props['damping'][i] = self.env_cfg['controller']['dgain']
-            leap_hand_dof_props['friction'][i] = 0.01
-            leap_hand_dof_props['armature'][i] = 0.001
+            leap_hand_dof_props['damping'][i]   = self.env_cfg['controller']['dgain']
+            leap_hand_dof_props['friction'][i]  = 0.01
+            leap_hand_dof_props['armature'][i]  = 0.001
 
         self.leap_hand_dof_lower_limits = to_torch(self.leap_hand_dof_lower_limits, device=self.device)
         self.leap_hand_dof_upper_limits = to_torch(self.leap_hand_dof_upper_limits, device=self.device)
-
-        self.leap_hand_dof_lower_limits = self.leap_hand_dof_lower_limits.repeat((self.num_envs, 1))  
+        # per-env limit jitter
+        self.leap_hand_dof_lower_limits = self.leap_hand_dof_lower_limits.repeat((self.num_envs, 1))
         self.leap_hand_dof_lower_limits += (2 * torch.rand_like(self.leap_hand_dof_lower_limits) - 1) * self.env_cfg["randomization"]["joint_limits"]
         self.leap_hand_dof_upper_limits = self.leap_hand_dof_upper_limits.repeat((self.num_envs, 1))
         self.leap_hand_dof_upper_limits += (2 * torch.rand_like(self.leap_hand_dof_upper_limits) - 1) * self.env_cfg["randomization"]["joint_limits"]
 
+        # ── Initial poses ─────────────────────────────────────────────────────
         hand_pose, obj_pose = self._init_object_pose()
 
-        # compute aggregate size
+        # ── Aggregate bookkeeping ─────────────────────────────────────────────
         self.num_leap_hand_bodies = self.gym.get_asset_rigid_body_count(self.hand_asset)
         self.num_leap_hand_shapes = self.gym.get_asset_rigid_shape_count(self.hand_asset)
         max_agg_bodies = self.num_leap_hand_bodies + 2
         max_agg_shapes = self.num_leap_hand_shapes + 2
 
-        self.envs = []
+        leap_hand_rb_count  = self.gym.get_asset_rigid_body_count(self.hand_asset)
+        self.object_rb_handles = list(range(leap_hand_rb_count, leap_hand_rb_count + 1))
 
-        self.object_init_state = []
-
-        self.hand_indices = []
-        self.object_indices = []
-
-        leap_hand_rb_count = self.gym.get_asset_rigid_body_count(self.hand_asset)
-        object_rb_count = 1
-        self.object_rb_handles = list(range(leap_hand_rb_count, leap_hand_rb_count + object_rb_count))
-        self.obj_scales = []
+        self.envs               = []
+        self.object_init_state  = []
+        self.hand_indices       = []
+        self.object_indices     = []
+        self.obj_scales         = []
         self.object_friction_buf = torch.zeros((self.num_envs), device=self.device, dtype=torch.float)
 
+        # ── Per-env creation loop ─────────────────────────────────────────────
         for i in range(num_envs):
-            # create env instance
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
             if self.aggregate_mode >= 1:
                 self.gym.begin_aggregate(env_ptr, max_agg_bodies * 20, max_agg_shapes * 20, True)
 
-            # add hand - collision filter = -1 to use asset collision filters set in mjcf loader
+            # Hand actor
+            # collision filter = -1 to use asset collision filters from the URDF loader
             hand_actor = self.gym.create_actor(env_ptr, self.hand_asset, hand_pose, 'hand', i, -1, 0)
             self.gym.enable_actor_dof_force_sensors(env_ptr, hand_actor)
             self.gym.set_actor_dof_properties(env_ptr, hand_actor, leap_hand_dof_props)
-            hand_idx = self.gym.get_actor_index(env_ptr, hand_actor, gymapi.DOMAIN_SIM)
-            self.hand_indices.append(hand_idx)
+            self.hand_indices.append(self.gym.get_actor_index(env_ptr, hand_actor, gymapi.DOMAIN_SIM))
 
-            # add object
+            # Object actor
             object_type_id = np.random.choice(len(self.object_type_list), p=self.object_type_prob)
-            object_asset = self.object_asset_list[object_type_id]
-
-            if self.env_cfg["disable_object_collision"]:
-                collision_group = -(i+2)
-            else:
-                collision_group = i
-
-            object_handle = self.gym.create_actor(env_ptr, object_asset, obj_pose, 'object', collision_group, 0, 0)
+            collision_group = -(i + 2) if self.env_cfg["disable_object_collision"] else i
+            object_handle = self.gym.create_actor(
+                env_ptr, self.object_asset_list[object_type_id], obj_pose, 'object', collision_group, 0, 0,
+            )
             self.object_init_state.append([
                 obj_pose.p.x, obj_pose.p.y, obj_pose.p.z,
                 obj_pose.r.x, obj_pose.r.y, obj_pose.r.z, obj_pose.r.w,
-                0, 0, 0, 0, 0, 0
+                0, 0, 0, 0, 0, 0,
             ])
-            object_idx = self.gym.get_actor_index(env_ptr, object_handle, gymapi.DOMAIN_SIM)
-            self.object_indices.append(object_idx)
+            self.object_indices.append(self.gym.get_actor_index(env_ptr, object_handle, gymapi.DOMAIN_SIM))
 
+            # Per-actor domain randomisation
             obj_scale = self.base_obj_scale
-            
             if self.randomize_scale:
                 num_scales = len(self.randomize_scale_list)
-                obj_scale = np.random.uniform(self.randomize_scale_list[i % num_scales] - 0.025, self.randomize_scale_list[i % num_scales] + 0.025)
-                
+                obj_scale = np.random.uniform(
+                    self.randomize_scale_list[i % num_scales] - 0.025,
+                    self.randomize_scale_list[i % num_scales] + 0.025,
+                )
                 if "randomize_scale_factor" in self.env_cfg:
                     obj_scale *= np.random.uniform(*self.env_cfg["randomize_scale_factor"])
-                
                 self.obj_scales.append(obj_scale)
             self.gym.set_actor_scale(env_ptr, object_handle, obj_scale)
 
-            obj_com = [0, 0, 0]
             if self.randomize_com:
                 prop = self.gym.get_actor_rigid_body_properties(env_ptr, object_handle)
                 assert len(prop) == 1
-                obj_com = [np.random.uniform(self.randomize_com_lower, self.randomize_com_upper),
-                           np.random.uniform(self.randomize_com_lower, self.randomize_com_upper),
-                           np.random.uniform(self.randomize_com_lower, self.randomize_com_upper)]
-                prop[0].com.x, prop[0].com.y, prop[0].com.z = obj_com
+                prop[0].com.x = np.random.uniform(self.randomize_com_lower, self.randomize_com_upper)
+                prop[0].com.y = np.random.uniform(self.randomize_com_lower, self.randomize_com_upper)
+                prop[0].com.z = np.random.uniform(self.randomize_com_lower, self.randomize_com_upper)
                 self.gym.set_actor_rigid_body_properties(env_ptr, object_handle, prop)
 
             obj_friction = 1.0
             if self.randomize_friction:
                 rand_friction = np.random.uniform(self.randomize_friction_lower, self.randomize_friction_upper)
-                hand_props = self.gym.get_actor_rigid_shape_properties(env_ptr, hand_actor)
-                for p in hand_props:
-                    p.friction = rand_friction
-                self.gym.set_actor_rigid_shape_properties(env_ptr, hand_actor, hand_props)
-
-                object_props = self.gym.get_actor_rigid_shape_properties(env_ptr, object_handle)
-                for p in object_props:
-                    p.friction = rand_friction
-                self.gym.set_actor_rigid_shape_properties(env_ptr, object_handle, object_props)
+                for actor_handle in (hand_actor, object_handle):
+                    props = self.gym.get_actor_rigid_shape_properties(env_ptr, actor_handle)
+                    for p in props:
+                        p.friction = rand_friction
+                    self.gym.set_actor_rigid_shape_properties(env_ptr, actor_handle, props)
                 obj_friction = rand_friction
             self.object_friction_buf[i] = obj_friction
 
             if self.aggregate_mode > 0:
                 self.gym.end_aggregate(env_ptr)
-
             self.envs.append(env_ptr)
 
-        self.obj_scales = torch.tensor(self.obj_scales, device=self.device)
-        self.object_init_state = to_torch(self.object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
-        self.object_rb_handles = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
-        self.hand_indices = to_torch(self.hand_indices, dtype=torch.long, device=self.device)
-        self.object_indices = to_torch(self.object_indices, dtype=torch.long, device=self.device)
+        # ── Post-loop: convert index lists to tensors ─────────────────────────
+        self.obj_scales         = torch.tensor(self.obj_scales, device=self.device)
+        self.object_init_state  = to_torch(self.object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
+        self.object_rb_handles  = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
+        self.hand_indices       = to_torch(self.hand_indices, dtype=torch.long, device=self.device)
+        self.object_indices     = to_torch(self.object_indices, dtype=torch.long, device=self.device)
 
+        # ── Video camera (env 0 only, if recording enabled) ───────────────────
         if self.env_cfg.get('record_video', False):
             cam_props = gymapi.CameraProperties()
-            cam_props.width = 640
+            cam_props.width  = 640
             cam_props.height = 480
             self.cam_handle = self.gym.create_camera_sensor(self.envs[0], cam_props)
-            # Env 0: hand base at (0, 0, 0.5), object at ~(−0.03, 0.04, 0.57).
-            # Camera sits to the side and slightly above, looking at the object centre.
+            # Env 0: hand base at (0,0,0.5), object at ~(−0.03, 0.04, 0.57).
             self.gym.set_camera_location(
                 self.cam_handle, self.envs[0],
                 gymapi.Vec3(0.5, 0.0, 0.9),
@@ -1068,93 +1099,8 @@ class LeapHandRot(VecTaskRot):
         self.torque_penalty_scale = r_cfg['torquePenaltyScale']
         self.work_penalty_scale = r_cfg['workPenaltyScale']
 
-    def _create_object_asset(self):
-        # object file to asset
-        asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../')
-        hand_asset_file = self.env_cfg['asset']['handAsset']
-        # load hand asset
-        hand_asset_options = gymapi.AssetOptions()
-        hand_asset_options.flip_visual_attachments = False
-        hand_asset_options.fix_base_link = True
-        hand_asset_options.collapse_fixed_joints = True
-        hand_asset_options.disable_gravity = False
-        hand_asset_options.thickness = 0.001
-        hand_asset_options.angular_damping = 0.01
-
-        # Convex decomposition
-        hand_asset_options.vhacd_enabled = True
-        hand_asset_options.vhacd_params.resolution = 300000
-        # hand_asset_options.vhacd_params.max_convex_hulls = 30
-        # hand_asset_options.vhacd_params.max_num_vertices_per_ch = 64
-
-        hand_asset_options.default_dof_drive_mode = gymapi.DOF_MODE_POS
-        self.hand_asset = self.gym.load_asset(self.sim, asset_root, hand_asset_file, hand_asset_options)
-        
-        if "leap_hand" in hand_asset_file:
-            rsp = self.gym.get_asset_rigid_shape_properties(self.hand_asset)   
-
-            for i, (_, body_group) in enumerate(self.env_cfg["mask_body_collision"].items()):
-                filter_value = 2 ** i
-
-                for body_idx in body_group:
-                    start, count = self.body_shape_indices[body_idx]
-                    
-                    for idx in range(count):
-                        rsp[idx + start].filter = rsp[idx + start].filter | filter_value 
-
-            if self.env_cfg["disable_self_collision"]: # Disable all collisions
-                for i in range(len(rsp)):
-                    rsp[i].filter = 1
-
-            self.gym.set_asset_rigid_shape_properties(self.hand_asset, rsp)
-
-        # load object asset
-        self.object_asset_list = []
-        for object_type in self.object_type_list:
-            object_asset_file = self.asset_files_dict[object_type]
-            object_asset_options = gymapi.AssetOptions()
-
-            if self.env_cfg["disable_gravity"]:
-                object_asset_options.disable_gravity = True
-
-            object_asset = self.gym.load_asset(self.sim, asset_root, object_asset_file, object_asset_options)
-            self.object_asset_list.append(object_asset)
-
     def _init_object_pose(self):
-        leap_hand_start_pose = gymapi.Transform()
-        leap_hand_start_pose.p = gymapi.Vec3(0, 0, self.env_cfg["leap_hand_start_z"])
-
-        leap_hand_start_pose.r = gymapi.Quat.from_axis_angle(gymapi.Vec3(1, 0, 0), np.pi) 
-        object_start_pose = gymapi.Transform()
-        object_start_pose.p = gymapi.Vec3()
-        object_start_pose.p.x = leap_hand_start_pose.p.x
-        pose_dx, pose_dy, pose_dz = -0.01, -0.04, 0.15
-
-        if "override_object_init_x" in self.env_cfg:
-            pose_dx = self.env_cfg["override_object_init_x"]
-
-        if "override_object_init_y" in self.env_cfg:
-            pose_dy = self.env_cfg["override_object_init_y"]
-
-        object_start_pose.p.x = leap_hand_start_pose.p.x + pose_dx
-        object_start_pose.p.y = leap_hand_start_pose.p.y + pose_dy
-        object_start_pose.p.z = leap_hand_start_pose.p.z + pose_dz
-
-        # for grasp pose generation, it is used to initialize the object
-        # it should be slightly higher than the fingertip
-        # so it is set to be 0.66 for internal leap and 0.64 for the public leap
-        # ----
-        # for in-hand object rotation, the initialization of z is only used in the first step
-        # it is set to be 0.65 for backward compatibility
-        object_z = 0.66 if self.save_init_pose else 0.65
-        if 'internal' not in self.grasp_cache_name:
-            object_z -= 0.02
-        object_start_pose.p.z = object_z
-
-        if "override_object_init_z" in self.env_cfg:
-            object_start_pose.p.z = self.env_cfg["override_object_init_z"] 
-
-        return leap_hand_start_pose, object_start_pose
+        return init_object_pose(self.env_cfg, self.save_init_pose, self.grasp_cache_name)
 
     def reward_rotate_finite_diff(self):
         min_angvel = self.env_cfg["reward"]["angvelClipMin"]

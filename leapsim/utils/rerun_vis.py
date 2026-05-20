@@ -80,11 +80,11 @@ class RerunVisualizer:
         )
         rr.init("leap_hand", recording_id=path.stem, spawn=False)
         rr.save(str(path))
-        print(f"[Rerun] window {self._window_count} → {path.name}")
+        # print(f"[Rerun] window {self._window_count} → {path.name}")
 
         for name in self._link_names:
             if name in self._meshes:
-                print("[rerun_vis] loading mesh for", name)
+                # print("[rerun_vis] loading mesh for", name)
                 verts, faces = self._meshes[name]
                 rr.log(
                     f"world/hand/{name}",
@@ -103,8 +103,8 @@ class RerunVisualizer:
         rr.set_time_sequence("step", self._window_step)
 
         for i, name in enumerate(self._link_names):
-            print("[rerun_vis] logging frame for", name)
-            print("[rerun_vis]", frame.rb_states[i], frame.rb_states[i].shape)
+            # print("[rerun_vis] logging frame for", name)
+            # print("[rerun_vis]", frame.rb_states[i], frame.rb_states[i].shape)
             rr.log(
                 f"world/hand/{name}",
                 rr.Transform3D(
