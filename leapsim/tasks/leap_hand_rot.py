@@ -11,7 +11,7 @@
 import os
 import sys
 from pathlib import Path
-from leapsim.utils.rerun_vis import RerunVisualizer, RerunFrame
+from leapsim.utils.rerun_vis import RerunVisualizer, RerunFrame, ObjectShape
 from leapsim.utils.env_setup import create_leap_assets, init_object_pose
 from attr import has
 from importlib_metadata import itertools
@@ -27,6 +27,21 @@ import warnings
 import matplotlib.pyplot as plt
 from .base.vec_task import VecTaskRot
 from collections import deque
+from typing import Dict
+
+
+# Map object.type → (rerun primitive, half-sizes). Half-sizes match the
+# geometry in the URDFs under assets/ — keep these in sync if URDFs change.
+_OBJECT_SHAPES: Dict[str, ObjectShape] = {
+    'simple_tennis_ball': ('ellipsoid', (0.04,   0.04,   0.04)),
+    'block':              ('box',       (0.0375, 0.0375, 0.0375)),
+    'hammer':             ('box',       (0.025,  0.01,   0.08)),
+}
+
+
+def _object_shape_for(obj_type: str) -> ObjectShape:
+    return _OBJECT_SHAPES.get(obj_type, ('box', (0.04, 0.04, 0.04)))
+
 
 class LeapHandRot(VecTaskRot):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture=None, force_render=None):
@@ -206,13 +221,16 @@ class LeapHandRot(VecTaskRot):
         # ── 11. Rerun visualizer ──────────────────────────────────────────────────
         rr_cfg = self.env_cfg.get('rerun', {})
         self._rr_env_idx = int(rr_cfg.get('env_idx', 0))
-        self._rerun_vis: RerunVisualizer = None
+        self._rerun_vis: RerunVisualizer | None = None
         if rr_cfg.get('enabled', False):
-            hand_handle = self.gym.find_actor_handle(self.envs[0], 'hand')
-            link_names = self.gym.get_actor_rigid_body_names(self.envs[0], hand_handle)
-            asset_root = Path(__file__).parent.parent.parent
-            urdf_path = asset_root / self.env_cfg['asset']['handAsset']
-            self._rerun_vis = RerunVisualizer(rr_cfg, urdf_path, link_names)
+            hand_handle  = self.gym.find_actor_handle(self.envs[0], 'hand')
+            link_names   = self.gym.get_actor_rigid_body_names(self.envs[0], hand_handle)
+            asset_root   = Path(__file__).parent.parent.parent
+            urdf_path    = asset_root / self.env_cfg['asset']['handAsset']
+            object_shape = _object_shape_for(self.env_cfg['object']['type'])
+            primary_type = self.object_type_list[0]
+            obj_urdf_path = asset_root / self.asset_files_dict[primary_type]
+            self._rerun_vis = RerunVisualizer(rr_cfg, urdf_path, link_names, object_shape, obj_urdf_path)
 
     def set_camera(self, position, lookat):
         """ 
@@ -408,8 +426,9 @@ class LeapHandRot(VecTaskRot):
         upper = gymapi.Vec3(spacing, spacing, spacing)
 
         # ── Asset loading ─────────────────────────────────────────────────────
+        asset_root = Path(__file__).parent.parent.parent
         self.hand_asset, self.object_asset_list = create_leap_assets(
-            self.gym, self.sim, self.env_cfg,
+            self.gym, self.sim, asset_root, self.env_cfg,
             self.body_shape_indices, self.object_type_list, self.asset_files_dict,
         )
 
@@ -1064,7 +1083,8 @@ class LeapHandRot(VecTaskRot):
         self.object_type_list = []
         self.asset_files_dict = {
             'simple_tennis_ball': 'assets/ball.urdf',
-            'cube': 'assets/cube.urdf'
+            'cube':               'assets/cube.urdf',
+            'hammer':             'assets/hammer.urdf',
         }
         for p_id, prim in enumerate(primitive_list):
             if 'cuboid' in prim:

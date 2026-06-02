@@ -36,6 +36,12 @@ from tensorboardX import SummaryWriter
 
 
 class CommonAgent(a2c_continuous.A2CAgent):
+    """
+    Documentation because currently its quite lacking in this whole repo.
+
+    Agent that inherits from A2CAgent
+    After initing, passes to algo observer
+    """
 
     def __init__(self, base_name, params):
     
@@ -79,8 +85,6 @@ class CommonAgent(a2c_continuous.A2CAgent):
         self.use_experimental_cv = self.config.get('use_experimental_cv', True)
         self.dataset = amp_datasets.AMPDataset(self.batch_size, self.minibatch_size, self.is_discrete, self.is_rnn, self.ppo_device, self.seq_len)
         self.algo_observer.after_init(self)
-        
-        return
 
     def init_tensors(self):
         super().init_tensors()
@@ -88,7 +92,6 @@ class CommonAgent(a2c_continuous.A2CAgent):
         self.experience_buffer.tensor_dict['next_values'] = torch.zeros_like(self.experience_buffer.tensor_dict['values'])
 
         self.tensor_list += ['next_obses']
-        return
 
     def train(self):
         self.init_tensors()
@@ -159,7 +162,6 @@ class CommonAgent(a2c_continuous.A2CAgent):
                     return self.last_mean_rewards, epoch_num
 
                 update_time = 0
-        return
 
     def train_epoch(self):
         play_time_start = time.time()

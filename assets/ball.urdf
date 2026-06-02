@@ -4,8 +4,8 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-        <mesh filename="ycb/056_tennis_ball/google_16k/textured.obj" scale="1.1934954497985975 1.1934954497985975 1.1934954497985975"/>
-	  </geometry>
+        <sphere radius="0.04"/>
+      </geometry>
     </visual>
     <collision>
       <origin xyz="0 0 0"/>

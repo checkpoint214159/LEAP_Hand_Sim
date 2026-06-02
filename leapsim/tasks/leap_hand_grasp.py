@@ -86,14 +86,9 @@ class LeapHandGrasp(LeapHandRot):
             np.save(name, self.saved_grasping_states[:self.cfg["env"]["grasp_cache_len"]].cpu().numpy())
             exit()
 
-        # reset object
+        # reset object — clone preserves the configured initial orientation
+        # (cols 3:7) from object_init_state, set by override_object_init_rot.
         self.root_state_tensor[self.object_indices[env_ids]] = self.object_init_state[env_ids].clone()
-        self.root_state_tensor[self.object_indices[env_ids], 0:2] = self.object_init_state[env_ids, 0:2]
-        self.root_state_tensor[self.object_indices[env_ids], self.up_axis_idx] = self.object_init_state[env_ids, self.up_axis_idx]
-        new_object_rot = randomize_rotation(rand_floats[:, 3], rand_floats[:, 4], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids])
-        new_object_rot[:] = 0
-        new_object_rot[:, -1] = 1
-        self.root_state_tensor[self.object_indices[env_ids], 3:7] = new_object_rot
         self.root_state_tensor[self.object_indices[env_ids], 7:13] = torch.zeros_like(
             self.root_state_tensor[self.object_indices[env_ids], 7:13])
 

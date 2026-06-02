@@ -8,3 +8,4 @@ isaacgym/
 *.pyc   
 *runs*
 *.log
+*.pth*

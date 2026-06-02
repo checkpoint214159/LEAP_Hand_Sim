@@ -18,11 +18,20 @@ defaults:
 env:
   controller:
     controlFrequencyInv: 8
-  
+
+  grasp_dof_search_radius: 0.25
+
   episodeLength: 50
   genGrasps: True
 
   disable_actions: True
+
+  rerun:
+    enabled: True
+    fidelity: mesh
+    window_length_steps: 50       # one full grasp attempt per .rrd window
+    record_every_n_steps: 1       # start at step 1, then back-to-back
+    env_idx: 0
 
   randomization:
     randomizeMass: True

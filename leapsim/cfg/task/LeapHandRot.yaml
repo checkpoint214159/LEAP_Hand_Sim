@@ -74,6 +74,8 @@ env:
   override_object_init_z: 0.57
   override_object_init_x: -0.03 
   override_object_init_y: 0.04
+  override_object_init_rot: [0.0, 0.0, 0.0]
+  
 
   canonical_pose:
     - 0.1458
@@ -126,7 +128,7 @@ env:
     enableObjFriction: True
 
   object:
-    type: 'simple_tennis_ball' # can be block, egg or pen
+    type: 'cube' # can be block, egg or pen
     sampleProb: [1.0]
 
   sim_to_real_indices: [1, 0, 2, 3, 9, 8, 10, 11, 13, 12, 14, 15, 4, 5, 6, 7]

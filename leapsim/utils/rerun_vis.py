@@ -1,11 +1,50 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, NamedTuple
+from typing import List, NamedTuple, Optional, Tuple
 import xml.etree.ElementTree as ET
 
 import numpy as np
 import rerun as rr
+import trimesh
+import trimesh.creation
+
+
+ObjectShape = Tuple[str, Tuple[float, float, float]]
+"""(primitive, half_sizes). primitive ∈ {'box', 'ellipsoid'}. Fallback when no mesh is available."""
+
+
+# Per-link colors for the LEAP hand. Each finger gets a hue; brightness ramps
+# base→tip (mcp_joint → pip → dip → fingertip) so you can tell joints apart.
+_HAND_LINK_COLORS: dict = {
+    "palm_lower":      (140, 140, 140),
+    # Index — red
+    "mcp_joint":       (140,  40,  40),
+    "pip":             (180,  60,  60),
+    "dip":             (215,  90,  90),
+    "fingertip":       (245, 130, 130),
+    # Middle — green
+    "mcp_joint_2":     ( 40, 130,  40),
+    "pip_2":           ( 60, 170,  60),
+    "dip_2":           ( 90, 210,  90),
+    "fingertip_2":     (130, 245, 130),
+    # Ring — blue
+    "mcp_joint_3":     ( 40,  70, 170),
+    "pip_3":           ( 60, 110, 210),
+    "dip_3":           ( 90, 150, 235),
+    "fingertip_3":     (130, 190, 250),
+    # Thumb — amber
+    "pip_4":           (170, 110,  30),
+    "thumb_pip":       (205, 145,  50),
+    "thumb_dip":       (230, 180,  80),
+    "thumb_fingertip": (250, 215, 110),
+}
+_OBJECT_COLOR = (220, 200, 100)
+_FALLBACK_LINK_COLOR = (200, 200, 200)
+
+
+def _link_color(name: str) -> Tuple[int, int, int]:
+    return _HAND_LINK_COLORS.get(name, _FALLBACK_LINK_COLOR)
 
 
 class RerunFrame(NamedTuple):
@@ -26,7 +65,14 @@ class RerunVisualizer:
     (when to open/close windows) and all rerun API calls.
     """
 
-    def __init__(self, rr_cfg: dict, urdf_path: Path, link_names: List[str]) -> None:
+    def __init__(
+        self,
+        rr_cfg: dict,
+        urdf_path: Path,
+        link_names: List[str],
+        object_shape: ObjectShape = ('box', (0.04, 0.04, 0.04)),
+        object_urdf_path: Optional[Path] = None,
+    ) -> None:
         self._enabled = bool(rr_cfg.get('enabled', False))
         if not self._enabled:
             return
@@ -37,8 +83,14 @@ class RerunVisualizer:
         self._fidelity      = rr_cfg.get('fidelity', 'mesh')
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._link_names = list(link_names)
-        self._meshes = self._load_meshes(urdf_path) if self._fidelity == 'mesh' else {}
+        self._link_names   = list(link_names)
+        self._object_shape = object_shape
+        self._meshes       = self._load_meshes(urdf_path) if self._fidelity == 'mesh' else {}
+
+        # Try to build object mesh from its URDF; fall back to ObjectShape primitive.
+        self._object_mesh: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        if object_urdf_path is not None:
+            self._object_mesh = _load_object_mesh(object_urdf_path)
 
         self._global_step  = 0
         self._window_step  = 0
@@ -80,31 +132,57 @@ class RerunVisualizer:
         )
         rr.init("leap_hand", recording_id=path.stem, spawn=False)
         rr.save(str(path))
-        # print(f"[Rerun] window {self._window_count} → {path.name}")
 
         for name in self._link_names:
+            color = _link_color(name)
             if name in self._meshes:
-                # print("[rerun_vis] loading mesh for", name)
                 verts, faces = self._meshes[name]
                 rr.log(
                     f"world/hand/{name}",
-                    rr.Mesh3D(vertex_positions=verts, triangle_indices=faces),
+                    rr.Mesh3D(
+                        vertex_positions=verts,
+                        triangle_indices=faces,
+                        albedo_factor=color,
+                    ),
                     static=True,
                 )
             else:
                 rr.log(
                     f"world/hand/{name}",
-                    rr.Boxes3D(half_sizes=[[0.008, 0.008, 0.008]]),
+                    rr.Boxes3D(half_sizes=[[0.008, 0.008, 0.008]], colors=[list(color)]),
                     static=True,
                 )
-        rr.log("world/object", rr.Boxes3D(half_sizes=[[0.04, 0.04, 0.04]]), static=True)
+
+        if self._object_mesh is not None:
+            verts, faces = self._object_mesh
+            rr.log(
+                "world/object",
+                rr.Mesh3D(
+                    vertex_positions=verts,
+                    triangle_indices=faces,
+                    albedo_factor=_OBJECT_COLOR,
+                ),
+                static=True,
+            )
+        else:
+            primitive, half_sizes = self._object_shape
+            if primitive == 'ellipsoid':
+                rr.log(
+                    "world/object",
+                    rr.Ellipsoids3D(half_sizes=[list(half_sizes)], colors=[list(_OBJECT_COLOR)]),
+                    static=True,
+                )
+            else:
+                rr.log(
+                    "world/object",
+                    rr.Boxes3D(half_sizes=[list(half_sizes)], colors=[list(_OBJECT_COLOR)]),
+                    static=True,
+                )
 
     def _log_frame(self, frame: RerunFrame) -> None:
         rr.set_time_sequence("step", self._window_step)
 
         for i, name in enumerate(self._link_names):
-            # print("[rerun_vis] logging frame for", name)
-            # print("[rerun_vis]", frame.rb_states[i], frame.rb_states[i].shape)
             rr.log(
                 f"world/hand/{name}",
                 rr.Transform3D(
@@ -129,7 +207,7 @@ class RerunVisualizer:
         rr.log("object/angvel_mag", rr.Scalar(frame.angvel_mag))
 
     # ------------------------------------------------------------------
-    # Asset loading (mesh fidelity only)
+    # Hand asset loading (mesh fidelity only)
     # ------------------------------------------------------------------
 
     def _load_meshes(self, urdf_path: Path) -> dict:
@@ -184,3 +262,92 @@ class RerunVisualizer:
         Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]], dtype=np.float32)
         R = (Rz @ Ry @ Rx).astype(np.float32)
         return (R @ verts.T).T + np.array(xyz, dtype=np.float32)
+
+
+# ------------------------------------------------------------------
+# Object mesh loading (module-level, shared across visualizer instances)
+# ------------------------------------------------------------------
+
+def _load_object_mesh(urdf_path: Path) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Parse object URDF and return a combined (verts, faces) for all visuals.
+
+    Handles:
+    - <mesh filename="..."> — loads STL or OBJ via trimesh
+    - <box size="x y z">    — tessellated with trimesh
+    - <cylinder radius length> — tessellated with trimesh
+    - <sphere radius>       — tessellated with trimesh
+    """
+    try:
+        tree = ET.parse(str(urdf_path))
+    except ET.ParseError as e:
+        print(f"[rerun_vis] failed to parse {urdf_path}: {e}")
+        return None
+
+    asset_dir = urdf_path.parent
+    parts: list[trimesh.Trimesh] = []
+
+    for link in tree.getroot().findall('link'):
+        for visual in link.findall('visual'):
+            origin = visual.find('origin')
+            if origin is not None:
+                xyz = [float(v) for v in origin.get('xyz', '0 0 0').split()]
+                rpy = [float(v) for v in origin.get('rpy', '0 0 0').split()]
+            else:
+                xyz, rpy = [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]
+
+            geom = visual.find('geometry')
+            if geom is None:
+                continue
+
+            mesh = _geometry_to_trimesh(geom, asset_dir)
+            if mesh is None:
+                continue
+
+            # Bake the visual origin transform into vertex positions.
+            T = trimesh.transformations.euler_matrix(*rpy)
+            T[:3, 3] = xyz
+            mesh.apply_transform(T)
+            parts.append(mesh)
+
+    if not parts:
+        return None
+
+    combined = trimesh.util.concatenate(parts) if len(parts) > 1 else parts[0]
+    verts = np.array(combined.vertices, dtype=np.float32)
+    faces = np.array(combined.faces, dtype=np.uint32)
+    return verts, faces
+
+
+def _geometry_to_trimesh(geom_elem, asset_dir: Path) -> Optional[trimesh.Trimesh]:
+    """Convert a URDF <geometry> element to a trimesh.Trimesh."""
+    mesh_elem = geom_elem.find('mesh')
+    if mesh_elem is not None:
+        filename = mesh_elem.get('filename', '')
+        scale_attr = mesh_elem.get('scale')
+        scale = [float(s) for s in scale_attr.split()] if scale_attr else [1.0, 1.0, 1.0]
+        path = asset_dir / filename
+        try:
+            loaded = trimesh.load(str(path), force='mesh')
+        except Exception as e:
+            print(f"[rerun_vis] could not load mesh {path}: {e}")
+            return None
+        loaded.apply_scale(scale)
+        return loaded
+
+    box_elem = geom_elem.find('box')
+    if box_elem is not None:
+        size = [float(v) for v in box_elem.get('size', '0.1 0.1 0.1').split()]
+        return trimesh.creation.box(extents=size)
+
+    cyl_elem = geom_elem.find('cylinder')
+    if cyl_elem is not None:
+        r = float(cyl_elem.get('radius', '0.05'))
+        l = float(cyl_elem.get('length', '0.1'))
+        return trimesh.creation.cylinder(radius=r, height=l)
+
+    sph_elem = geom_elem.find('sphere')
+    if sph_elem is not None:
+        r = float(sph_elem.get('radius', '0.05'))
+        return trimesh.creation.icosphere(radius=r)
+
+    return None

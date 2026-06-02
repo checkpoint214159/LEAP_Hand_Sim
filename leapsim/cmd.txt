@@ -1,0 +1,50 @@
+# some commands for convenience
+# you can override here or just change the config directly
+
+# emable rerun via:
+task.env.rerun.enabled=true
+
+# checkpoint weights are at /root/odyssey/dexterousmanipulation/src/LEAP_Hand_Sim/weights
+# but i didnt fix any paths so yeah just make sure its relative to where you're running
+
+Running in ~/odyssey/dexterousmanipulation/src/LEAP_Hand_Sim/leapsim/:
+
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true task.env.numEnvs=64 \
+    task.env.rerun.record_every_n_steps=100 \
+    checkpoint=../weights/LeapHand.pth
+
+# set test=true flag (or config once again) to go into play/inferece mode
+
+# latest ball train mode: we're gonna do a whole lotta envs.
+# window_length_steps=400 (1 episode); period=2000 → record one episode every
+# ~5 episodes of training. Sparse enough to keep file count manageable.
+
+
+# hammer train
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true \
+    task.env.rerun.record_every_n_steps=2000 \
+    checkpoint=../weights/LeapHand.pth \
+    task.env.object.type=hammer \
+    task.env.grasp_cache_name='leap_hand_in_hammer' \
+    task.env.numEnvs=8192 \
+    task.env.randomization.randomizeScaleList=[1.0] \
+    task.env.reward.poseDiffPenaltyScale=0 \
+    task.env.reward.objLinvelPenaltyScale=-0.1
+
+
+# to create a cache for your grasp, just run the corresponding shell:
+source scripts/gen_grasp.sh 1.0 leap_hand_in_ball
+1st arg is scale, second arg is filepath to save relat ive to pwd/cache/.
+dont worry about tagging as 50k and s10, the script autotags iters and scale. so just like
+put the cache filename is all
+# oh wait we need to change the location and orientation of the thing you want to grasp.
+# this is very important since if you dont do that, how can you even rotate
+# see the env config keys:
+override_object_init_x
+override_object_init_y
+override_object_init_z
+override_object_init_rot
+# change these accordingly
+
