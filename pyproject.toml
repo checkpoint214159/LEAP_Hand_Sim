@@ -18,6 +18,8 @@ dependencies = [
     "wandb",
     "isaacgym",
     "moviepy>=1.0.3",
+    "trimesh>=4.12.2",
+    "rtree>=1.3.0",
 ]
 
 [build-system]

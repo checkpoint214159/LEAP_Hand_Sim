@@ -5,11 +5,11 @@
          grips it with a power grip (handle across the palm) and rotates
          it about the handle's long axis. -->
 
-    <!-- Handle: 12 cm long, 14 mm radius (~real hammer grip size), along x-axis -->
+    <!-- Handle: 20 cm long, 14 mm radius (~real hammer grip size), along x-axis -->
     <visual>
       <origin xyz="0 0 0" rpy="0 1.5708 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.12"/>
+        <cylinder radius="0.014" length="0.20"/>
       </geometry>
       <material name="wood">
         <color rgba="0.8 0.5 0.2 1.0"/>
@@ -18,14 +18,14 @@
     <collision>
       <origin xyz="0 0 0" rpy="0 1.5708 0"/>
       <geometry>
-        <cylinder radius="0.014" length="0.12"/>
+        <cylinder radius="0.014" length="0.20"/>
       </geometry>
     </collision>
 
     <!-- Head: at the +x end of the handle; long face along y (perpendicular
          to handle), so it looks like a real hammer head -->
     <visual>
-      <origin xyz="0.075 0 0" rpy="0 0 0"/>
+      <origin xyz="0.11 0 0" rpy="0 0 0"/>
       <geometry>
         <box size="0.02 0.06 0.025"/>
       </geometry>
@@ -34,7 +34,7 @@
       </material>
     </visual>
     <collision>
-      <origin xyz="0.075 0 0" rpy="0 0 0"/>
+      <origin xyz="0.11 0 0" rpy="0 0 0"/>
       <geometry>
         <box size="0.02 0.06 0.025"/>
       </geometry>

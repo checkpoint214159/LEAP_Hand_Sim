@@ -222,15 +222,15 @@ class LeapHandRot(VecTaskRot):
         rr_cfg = self.env_cfg.get('rerun', {})
         self._rr_env_idx = int(rr_cfg.get('env_idx', 0))
         self._rerun_vis: RerunVisualizer | None = None
+        asset_root   = Path(__file__).parent.parent.parent
+        self.hand_urdf_path    = asset_root / self.env_cfg['asset']['handAsset']
+        object_shape = _object_shape_for(self.env_cfg['object']['type'])
+        primary_type = self.object_type_list[0]
+        self.obj_urdf_path = asset_root / self.asset_files_dict[primary_type]
         if rr_cfg.get('enabled', False):
             hand_handle  = self.gym.find_actor_handle(self.envs[0], 'hand')
             link_names   = self.gym.get_actor_rigid_body_names(self.envs[0], hand_handle)
-            asset_root   = Path(__file__).parent.parent.parent
-            urdf_path    = asset_root / self.env_cfg['asset']['handAsset']
-            object_shape = _object_shape_for(self.env_cfg['object']['type'])
-            primary_type = self.object_type_list[0]
-            obj_urdf_path = asset_root / self.asset_files_dict[primary_type]
-            self._rerun_vis = RerunVisualizer(rr_cfg, urdf_path, link_names, object_shape, obj_urdf_path)
+            self._rerun_vis = RerunVisualizer(rr_cfg, self.hand_urdf_path, link_names, object_shape, self.obj_urdf_path)
 
     def set_camera(self, position, lookat):
         """ 
@@ -511,6 +511,7 @@ class LeapHandRot(VecTaskRot):
                 if "randomize_scale_factor" in self.env_cfg:
                     obj_scale *= np.random.uniform(*self.env_cfg["randomize_scale_factor"])
                 self.obj_scales.append(obj_scale)
+            # print("env_ptr, object_handle, obj_scale?", env_ptr, object_handle, obj_scale)
             self.gym.set_actor_scale(env_ptr, object_handle, obj_scale)
 
             if self.randomize_com:

@@ -18,12 +18,14 @@
 
 import isaacgym  # must precede any torch import; see CLAUDE.md  # noqa: F401
 
+import datetime
 from pathlib import Path
 
 import hydra
 import numpy as np
 import torch
 import yaml
+from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 
 from leapsim.tasks import isaacgym_task_map
@@ -40,7 +42,6 @@ DEFAULTS = dict(
     sigma_floor=0.05,     # minimum sigma so the distribution doesn't collapse
     steps_per_eval=55,    # one full grasp episode + small margin
     seed_pose_jitter=0.0, # additive jitter on the seed pose before round 1
-    output='cache/canonical_pose_optimized.yaml',
 )
 
 
@@ -75,14 +76,22 @@ def main(cfg: DictConfig) -> None:
     set_seed(cfg.seed)
     optim = _read_optim_cfg(cfg)
 
-    # The grasp task auto-saves the cache and calls exit() when
-    # grasp_cache_len is reached. Push it past anything we'd produce so
-    # the loop stays in our hands.
+    # ── Run directory (mirrors train.py) ────────────────────────────────────────
+    time_str       = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_name       = f"PoseOptim_{time_str}"
+    runs_dir       = Path(to_absolute_path(cfg.runs_dir))
+    experiment_dir = runs_dir / run_name
+    rerun_dir      = experiment_dir / "rerun"
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Config tweaks ────────────────────────────────────────────────────────────
+    OmegaConf.set_struct(cfg, False)
+    # Push cache limit past anything we'd produce — optimizer manages the loop.
     cfg.task.env.grasp_cache_len = int(1e9)
     cfg.task.env.genGrasps = True
-    # Rerun would burn disk for hundreds of evaluations — turn it off.
-    if hasattr(cfg.task.env, 'rerun'):
-        cfg.task.env.rerun.enabled = False
+    # Wire rerun output dir the same way train.py does; respect enabled flag from config.
+    if cfg.task.env.get('rerun', {}).get('enabled', False):
+        cfg.task.env.rerun.output_dir = str(rerun_dir)
 
     cfg_dict = omegaconf_to_dict(cfg.task)
     cfg_dict['env']['numEnvs'] = int(cfg.task.env.numEnvs)
@@ -105,6 +114,7 @@ def main(cfg: DictConfig) -> None:
     mean = seed_pose.copy()
     sigma = np.full(n_dof, optim['sigma_init'], dtype=np.float32)
 
+    print(f"[optim] run_dir={experiment_dir}")
     print(f"[optim] task={cfg.task_name} num_envs={task.num_envs} device={task.device}")
     print(f"[optim] seed pose: {seed_pose.tolist()}")
     print(f"[optim] iter={optim['iterations']} K={optim['candidates']} elite={optim['elite']} sigma_init={optim['sigma_init']}")
@@ -147,8 +157,7 @@ def main(cfg: DictConfig) -> None:
     print("[optim] best pose:")
     print(yaml.safe_dump({'canonical_pose': best_pose.tolist()}, default_flow_style=False))
 
-    out_path = Path(optim['output'])
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = experiment_dir / "canonical_pose_optimized.yaml"
     with open(out_path, 'w') as f:
         yaml.safe_dump(
             {
