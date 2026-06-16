@@ -136,6 +136,7 @@ class LeapHandRot(VecTaskRot):
         if self.randomize_scale and self.scale_list_init:
             self.saved_grasping_states = {}
             for s in self.randomize_scale_list:
+                print("loading from cache path:", f'cache/{self.grasp_cache_name}_grasp_50k_s{str(s).replace(".", "")}.npy')
                 self.saved_grasping_states[str(s)] = torch.from_numpy(np.load(
                     f'cache/{self.grasp_cache_name}_grasp_50k_s{str(s).replace(".", "")}.npy'
                 )).float().to(self.device)
@@ -601,14 +602,18 @@ class LeapHandRot(VecTaskRot):
                 sampled_pose_idx = np.random.randint(self.saved_grasping_states[scale_key].shape[0], size=len(s_ids))
             
             sampled_pose = self.saved_grasping_states[scale_key][sampled_pose_idx].clone()
+            print("Sampled pose idx?", sampled_pose_idx)
+            print("sampled_pose?", sampled_pose)
+            print("example object poses?", sampled_pose[0, 16:19])
             self.root_state_tensor[self.object_indices[s_ids], :7] = sampled_pose[:, 16:]
             self.root_state_tensor[self.object_indices[s_ids], 7:13] = 0
-            pos = sampled_pose[:, :16]
-            self.leap_hand_dof_pos[s_ids, :] = pos
+            
+            hand_pos = sampled_pose[:, :16]
+            self.leap_hand_dof_pos[s_ids, :] = hand_pos
             self.leap_hand_dof_vel[s_ids, :] = 0
-            self.prev_targets[s_ids, :self.num_leap_hand_dofs] = pos
-            self.cur_targets[s_ids, :self.num_leap_hand_dofs] = pos
-            self.init_pose_buf[s_ids, :] = pos.clone()
+            self.prev_targets[s_ids, :self.num_leap_hand_dofs] = hand_pos
+            self.cur_targets[s_ids, :self.num_leap_hand_dofs] = hand_pos
+            self.init_pose_buf[s_ids, :] = hand_pos.clone()
             self.object_init_pose_buf[s_ids, :] = sampled_pose[:, 16:].clone() 
 
         object_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)

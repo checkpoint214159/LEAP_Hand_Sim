@@ -8,6 +8,7 @@
 # https://github.com/HaozhiQi/hora/blob/main/hora/tasks/leap_hand_grasp.py
 # --------------------------------------------------------
 
+import atexit
 import yaml
 import torch
 import numpy as np
@@ -122,6 +123,11 @@ class LeapHandGrasp(LeapHandRot):
                 dtype=torch.float32, device=self.device,
             )                                                              # [N]
 
+        # Flush whatever's in the cache on any process exit (Ctrl+C, crash, etc.)
+        # so partial runs aren't thrown away. The exit() at cache-full also calls
+        # _save_cache so the threshold-reached path still works.
+        atexit.register(self._save_cache_partial)
+
 
 
     # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,6 +137,24 @@ class LeapHandGrasp(LeapHandRot):
 
     def _stats_path(self) -> str:
         return self._cache_path().replace('.npy', '_stats.yaml')
+
+    def _save_cache_partial(self) -> None:
+        """Write whatever grasps we have right now to disk. Safe to call
+        repeatedly. Called from reset_idx every time a success arrives, AND
+        from atexit on any process termination, AND when the cache fills.
+        """
+        if not hasattr(self, 'saved_grasping_states'):
+            return  # init failed early; nothing to save
+        n = int(self.saved_grasping_states.shape[0])
+        if n == 0:
+            return
+        # Trim to the configured cache_len if we somehow overshot (we shouldn't
+        # in normal flow, but defensive).
+        target = int(self.cfg["env"]["grasp_cache_len"])
+        rows   = self.saved_grasping_states[:target] if n > target else self.saved_grasping_states
+        np.save(self._cache_path(), rows.cpu().numpy())
+        self._dump_stats_yaml()
+        print(f'[cache] flushed {rows.shape[0]} grasps to {self._cache_path()}')
 
     def _dump_stats_yaml(self) -> None:
         ep = max(1, self._gs_ep_count)
@@ -249,10 +273,11 @@ class LeapHandGrasp(LeapHandRot):
             f'best_fit={best_score:.2f}'
         )
 
-        # ── Save cache + stats when full ───────────────────────────────────────
+        # ── Exit when target reached ───────────────────────────────────────────
+        # No per-reset save: the atexit hook in __init__ flushes whatever's
+        # accumulated on any process termination (clean exit, Ctrl+C, etc.).
         if len(self.saved_grasping_states) >= self.cfg["env"]["grasp_cache_len"]:
-            np.save(self._cache_path(), self.saved_grasping_states[:self.cfg["env"]["grasp_cache_len"]].cpu().numpy())
-            self._dump_stats_yaml()
+            print(f'[cache] reached target {self.cfg["env"]["grasp_cache_len"]} grasps — exiting.')
             exit()
 
         # ── Reset per-episode accumulators for these envs ──────────────────────
