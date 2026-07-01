@@ -21,24 +21,58 @@ uv run python train.py headless=true wandb_activate=false \
 # ~5 episodes of training. Sparse enough to keep file count manageable.
 
 
+# SAC train
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true \
+    task=LeapHandRot train=LeapHandRotSAC \
+    num_envs=512 \
+    train.params.config.num_steps_per_episode=32 \
+    train.params.config.batch_size=8192 \
+    train.params.config.init_alpha=0.2
+
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true \
+    task=LeapHandRot train=LeapHandRotTD3 \
+    num_envs=512 \
+    train.params.config.num_steps_per_episode=32 \
+    train.params.config.batch_size=8192
+
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true \
+    task=LeapHandRot train=LeapHandRotPPO \
+    num_envs=512 \
+    train.params.config.minibatch_size=8192
+
+uv run python train.py headless=true wandb_activate=false \
+    task.env.rerun.enabled=true \
+    task=LeapHandRot train=LeapHandRotSAPG \
+    num_envs=4096 \
+    train.params.config.sapg.num_chunks=8 \
+    train.params.config.minibatch_size=8192
+
 # hammer train
 uv run python train.py headless=true wandb_activate=false \
     task.env.rerun.enabled=true \
-    task.env.rerun.record_every_n_steps=1 \
-    task.env.rerun.window_length_steps=200 \
-    checkpoint=../weights/LeapHand.pth \
+    checkpoint=/root/odyssey/dexterousmanipulation/src/LEAP_Hand_Sim/leapsim/runs/LeapHand_2026-06-17_16-12-31/nn/last_LeapHand_ep_2000_rew_-4.069732.pth \
     task.env.object.type=hammer \
     task.env.grasp_cache_name='leap_hand_in_hammer' \
     task.env.numEnvs=4096 \
-    task.env.randomization.randomizeScaleList=[1.0] \
+    task.env.randomization.randomizeScaleList=[1] \
     task.env.reward.poseDiffPenaltyScale=0 \
     task.env.reward.objLinvelPenaltyScale=-0.1 \
     task.env.override_object_init_rot=[0,0,1.5708] \
     task.env.override_object_init_z=0.61 \
     task.env.override_object_init_x=-0.03 \
     task.env.override_object_init_y=0.05 \
-    'task.env.canonical_pose=[0.69,-0.52,1.0,-0.35,1,1.1,0.6,0.3,0.77,0.0,1.0,-0.35,0.73,0.22,1.0,-0.35]' 
-
+    'task.env.canonical_pose=[0.69,-0.52,1.0,-0.35,1,1.1,0.6,0.3,0.77,0.0,1.0,-0.35,0.73,0.22,1.0,-0.35]' \
+    task.env.reward.angvelClipMin=-0.5 \
+    task.env.reward.angvelClipMax=0.5 \
+    task.env.reward.workPenaltyScale=-0.3 \
+    task.env.reward.poseDiffPenaltyScale=-0.03 \
+    train.params.config.learning_rate=1e-3 \
+    train.params.config.entropy_coef=0.001 \
+    train.params.config.horizon_length=64
+    
 
 # to create a cache for your grasp, just run the corresponding shell:
 source scripts/gen_grasp.sh 1.0 leap_hand_in_ball

@@ -20,7 +20,7 @@ EXTRA_ARGS_SLUG=${EXTRA_ARGS// /_}
 
 uv run python train.py task=LeapHandGrasp task.env.baseObjScale=$SCALE \
     task.env.grasp_cache_name=$GRASP_CACHE test=true pipeline=cpu test=true \
-    train.params.config.player.games_num=20000000 task.env.episodeLength=150 \
+    train.params.config.player.games_num=5000000 task.env.episodeLength=150 \
     task.env.numEnvs=1024 \
     wandb_activate=false task.env.object.type='hammer' \
     task.env.disable_actions=True \

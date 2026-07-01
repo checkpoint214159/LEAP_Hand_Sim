@@ -602,9 +602,9 @@ class LeapHandRot(VecTaskRot):
                 sampled_pose_idx = np.random.randint(self.saved_grasping_states[scale_key].shape[0], size=len(s_ids))
             
             sampled_pose = self.saved_grasping_states[scale_key][sampled_pose_idx].clone()
-            print("Sampled pose idx?", sampled_pose_idx)
-            print("sampled_pose?", sampled_pose)
-            print("example object poses?", sampled_pose[0, 16:19])
+            # print("Sampled pose idx?", sampled_pose_idx)
+            # print("sampled_pose?", sampled_pose)
+            # print("example object poses?", sampled_pose[0, 16:19])
             self.root_state_tensor[self.object_indices[s_ids], :7] = sampled_pose[:, 16:]
             self.root_state_tensor[self.object_indices[s_ids], 7:13] = 0
             

@@ -18,6 +18,7 @@ from pathlib import Path
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import to_absolute_path
+from hydra.core.hydra_config import HydraConfig
 from leapsim.utils.reformat import omegaconf_to_dict, print_dict
 from leapsim.utils.utils import set_np_formatting, set_seed
 from leapsim.utils.rlgames_utils import RLGPUEnv
@@ -81,7 +82,10 @@ def main_with_cfg_overrides(cfg: DictConfig) -> None:
     runner.load(omegaconf_to_dict(cfg.train))
     runner.reset()
 
-    # Snapshot configs alongside the run for reproducibility.
+    # Snapshot configs alongside the run for reproducibility. The train config
+    # filename is the actually-selected one (e.g. LeapHandRotPPO / ...SAC /
+    # ...TD3), not a hardcoded PPO name.
+    train_cfg_name: str = HydraConfig.get().runtime.choices["train"]
     leapsim_cfg_dir: Path = Path(__file__).parent / "cfg"
     experiment_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(
@@ -89,8 +93,8 @@ def main_with_cfg_overrides(cfg: DictConfig) -> None:
         experiment_dir            / f"{cfg.task_name}.yaml",
     )
     shutil.copyfile(
-        leapsim_cfg_dir / "train" / f"{cfg.task_name}PPO.yaml",
-        experiment_dir            / f"{cfg.task_name}PPO.yaml",
+        leapsim_cfg_dir / "train" / f"{train_cfg_name}.yaml",
+        experiment_dir            / f"{train_cfg_name}.yaml",
     )
     with open(experiment_dir / "config.yaml", "w") as f:
         f.write(OmegaConf.to_yaml(cfg))
@@ -98,7 +102,7 @@ def main_with_cfg_overrides(cfg: DictConfig) -> None:
     if cfg.wandb_activate and rank == 0:
         wandb.save(str(experiment_dir / "config.yaml"))
         wandb.save(str(experiment_dir / f"{cfg.task_name}.yaml"))
-        wandb.save(str(experiment_dir / f"{cfg.task_name}PPO.yaml"))
+        wandb.save(str(experiment_dir / f"{train_cfg_name}.yaml"))
 
     if cfg.multi_gpu:
         import horovod.torch as hvd

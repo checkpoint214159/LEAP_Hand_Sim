@@ -1,0 +1,106 @@
+# --------------------------------------------------------
+# LEAP Hand: Low-Cost, Efficient, and Anthropomorphic Hand for Robot Learning
+# https://arxiv.org/abs/2309.06440
+# Copyright (c) 2023 Ananye Agarwal
+# Licensed under The MIT License [see LICENSE for details]
+# --------------------------------------------------------
+# Based on: IsaacGymEnvs
+# Copyright (c) 2018-2022, NVIDIA Corporation
+# Licence under BSD 3-Clause License
+# https://github.com/NVIDIA-Omniverse/IsaacGymEnvs/
+# --------------------------------------------------------
+#
+# SAPG (Split and Aggregate Policy Gradients, ICML 2024) re-derived on rl_games
+# 1.5.2 -- see leapsim/learning/sapg_agent.py. The `sapg` algo reuses the stock
+# continuous_a2c_logstd model + actor_critic network (the agent enlarges the
+# input by `sapg.conditioning_dim`). First cut is FEED-FORWARD (no RNN block).
+#
+# IMPORTANT: num_envs must be divisible by sapg.num_chunks (default 6).
+# Hyperparameters otherwise mirror LeapHandRotPPO for an apples-to-apples baseline.
+
+params:
+  seed: ${...seed}
+
+  algo:
+    name: sapg
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: actor_critic
+    separate: False
+
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+
+    mlp:
+      units: [512, 256, 128]
+      activation: elu
+      d2rl: False
+
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+  load_checkpoint: ${if:${...checkpoint},True,False}
+  load_path: ${...checkpoint}
+
+  config:
+    name: ${resolve_default:LeapHand,${....experiment}}
+    full_experiment_name: ${.name}
+    train_dir: ${....runs_dir}
+    env_name: rlgpu
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    num_actors: ${....task.env.numEnvs}
+    reward_shaper:
+      scale_value: 0.01
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 5e-3
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.02
+    score_to_win: 100000
+    max_epochs: ${resolve_default:5000,${....max_iterations}}
+    save_best_after: 100
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 32
+    minibatch_size: 32768
+    mini_epochs: 5
+    critic_coef: 4
+    clip_value: True
+    seq_len: 4
+    bounds_loss_coef: 0.0001
+
+    # SAPG-specific (core split-aggregate; ir_type=none -- no intrinsic reward).
+    sapg:
+      num_chunks: 6           # M: env pool split into M chunks (num_envs % M == 0)
+      conditioning_dim: 32    # size of fixed per-chunk code appended to observations
+      off_policy_ratio: 5     # follower chunks the leader replays per update (<= M-1)
+      shuffle_augmented: True
+
+    player:
+      deterministic: True
+      games_num: 100000
+      print_stats: True
