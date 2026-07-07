@@ -13,10 +13,11 @@
 # SAPG (Split and Aggregate Policy Gradients, ICML 2024) re-derived on rl_games
 # 1.5.2 -- see leapsim/learning/sapg_agent.py. The `sapg` algo reuses the stock
 # continuous_a2c_logstd model + actor_critic network (the agent enlarges the
-# input by `sapg.conditioning_dim`). First cut is FEED-FORWARD (no RNN block).
+# input by `sapg.conditioning_dim`). Uses the SAME GRU architecture as
+# LeapHandRotPPO so PPO-vs-SAPG is apples-to-apples (the paper also uses a
+# recurrent policy). All other hyperparameters mirror LeapHandRotPPO.
 #
 # IMPORTANT: num_envs must be divisible by sapg.num_chunks (default 6).
-# Hyperparameters otherwise mirror LeapHandRotPPO for an apples-to-apples baseline.
 
 params:
   seed: ${...seed}
@@ -51,6 +52,14 @@ params:
         name: default
       regularizer:
         name: None
+
+    rnn:
+      name: gru
+      units: 256
+      layers: 1
+      before_mlp: true
+      concat_input: true
+      layer_norm: true
 
   load_checkpoint: ${if:${...checkpoint},True,False}
   load_path: ${...checkpoint}

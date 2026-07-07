@@ -1109,6 +1109,14 @@ class LeapHandRot(VecTaskRot):
                 for i, name in enumerate(cylinders):
                     self.asset_files_dict[f'cylinder_{i}'] = name.replace('../assets/', 'assets/')
                 self.object_type_prob += [raw_prob[p_id] / len(cylinder_list) for _ in cylinder_list]
+            elif 'sphere' in prim:
+                subset_name = self.object_type.split('_')[-1]
+                spheres = sorted(glob(f'../assets/sphere/{subset_name}/*.urdf'))
+                sphere_list = [f'sphere_{i}' for i in range(len(spheres))]
+                self.object_type_list += sphere_list
+                for i, name in enumerate(spheres):
+                    self.asset_files_dict[f'sphere_{i}'] = name.replace('../assets/', 'assets/')
+                self.object_type_prob += [raw_prob[p_id] / len(sphere_list) for _ in sphere_list]
             else:
                 self.object_type_list += [prim]
                 self.object_type_prob += [raw_prob[p_id]]
