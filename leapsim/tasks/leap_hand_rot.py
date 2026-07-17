@@ -133,13 +133,27 @@ class LeapHandRot(VecTaskRot):
         self.early_termination_buf    = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # ── 8. Grasp cache ───────────────────────────────────────────────────────
+        # Rows are 23 cols (16 hand DoF + 7 obj pose) or 24 cols (+ object_type_id).
+        # 24-col caches are object-aware: at reset each env samples only rows saved
+        # for the object instance it holds (cache_rows_by_obj). Legacy 23-col caches
+        # (single-object families: ball/cube/hammer) keep the old any-row behavior.
+        self.cache_rows_by_obj = {}
         if self.randomize_scale and self.scale_list_init:
             self.saved_grasping_states = {}
             for s in self.randomize_scale_list:
                 print("loading from cache path:", f'cache/{self.grasp_cache_name}_grasp_50k_s{str(s).replace(".", "")}.npy')
-                self.saved_grasping_states[str(s)] = torch.from_numpy(np.load(
-                    f'cache/{self.grasp_cache_name}_grasp_50k_s{str(s).replace(".", "")}.npy'
-                )).float().to(self.device)
+                arr = np.load(f'cache/{self.grasp_cache_name}_grasp_50k_s{str(s).replace(".", "")}.npy')
+                self.saved_grasping_states[str(s)] = torch.from_numpy(arr).float().to(self.device)
+                if arr.shape[1] >= 24:
+                    ids = arr[:, -1].astype(np.int64)  # obj id is always the last column
+                    self.cache_rows_by_obj[str(s)] = {
+                        int(oid): np.flatnonzero(ids == oid) for oid in np.unique(ids)
+                    }
+                    counts = {oid: len(rows) for oid, rows in self.cache_rows_by_obj[str(s)].items()}
+                    missing = [t for t in range(len(self.object_type_list)) if t not in counts]
+                    print(f"  object-aware cache: rows per object id {counts}"
+                          + (f" — NO ROWS for object ids {missing} (those envs fall back to any row)"
+                             if missing else ""))
         else:
             assert self.save_init_pose
 
@@ -475,6 +489,21 @@ class LeapHandRot(VecTaskRot):
         self.obj_scales         = []
         self.object_friction_buf = torch.zeros((self.num_envs), device=self.device, dtype=torch.float)
 
+        # Per-env object identity (index into object_type_list). Grasp caches are
+        # per-object: rows are saved with this id (col 24) and restored only into
+        # envs holding the same object. object_ids_from_cache forces env i to hold
+        # the object of cache row i — used by tools/filter_grasp_caches.py so the
+        # row↔env mapping is object-correct.
+        env_object_type_id = []
+        forced_ids = None
+        if "object_ids_from_cache" in self.env_cfg:
+            _cache_arr = np.load(self.env_cfg["object_ids_from_cache"])
+            if _cache_arr.shape[1] >= 24:
+                forced_ids = _cache_arr[:, -1].astype(np.int64)  # id = last column
+            else:
+                print(f"[object_ids_from_cache] {self.env_cfg['object_ids_from_cache']} "
+                      f"has no object-id column (23-col legacy cache); ignoring.")
+
         # ── Per-env creation loop ─────────────────────────────────────────────
         for i in range(num_envs):
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -489,7 +518,11 @@ class LeapHandRot(VecTaskRot):
             self.hand_indices.append(self.gym.get_actor_index(env_ptr, hand_actor, gymapi.DOMAIN_SIM))
 
             # Object actor
-            object_type_id = np.random.choice(len(self.object_type_list), p=self.object_type_prob)
+            if forced_ids is not None:
+                object_type_id = int(forced_ids[i % len(forced_ids)])
+            else:
+                object_type_id = np.random.choice(len(self.object_type_list), p=self.object_type_prob)
+            env_object_type_id.append(int(object_type_id))
             collision_group = -(i + 2) if self.env_cfg["disable_object_collision"] else i
             object_handle = self.gym.create_actor(
                 env_ptr, self.object_asset_list[object_type_id], obj_pose, 'object', collision_group, 0, 0,
@@ -505,9 +538,14 @@ class LeapHandRot(VecTaskRot):
             obj_scale = self.base_obj_scale
             if self.randomize_scale:
                 num_scales = len(self.randomize_scale_list)
+                # ±jitter around the list value (upstream hardcoded 0.025). Pinnable
+                # via scale_list_jitter=0 so cache replays restore the EXACT scale
+                # the grasp was settled at — a cage grasp restored ±2.5% either
+                # wedges (PhysX pops it) or sags loose onto the palm.
+                jitter = float(self.env_cfg.get("scale_list_jitter", 0.025))
                 obj_scale = np.random.uniform(
-                    self.randomize_scale_list[i % num_scales] - 0.025,
-                    self.randomize_scale_list[i % num_scales] + 0.025,
+                    self.randomize_scale_list[i % num_scales] - jitter,
+                    self.randomize_scale_list[i % num_scales] + jitter,
                 )
                 if "randomize_scale_factor" in self.env_cfg:
                     obj_scale *= np.random.uniform(*self.env_cfg["randomize_scale_factor"])
@@ -539,6 +577,7 @@ class LeapHandRot(VecTaskRot):
             self.envs.append(env_ptr)
 
         # ── Post-loop: convert index lists to tensors ─────────────────────────
+        self.env_object_type_id = to_torch(env_object_type_id, dtype=torch.long, device=self.device)
         self.obj_scales         = torch.tensor(self.obj_scales, device=self.device)
         self.object_init_state  = to_torch(self.object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
         self.object_rb_handles  = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
@@ -598,23 +637,51 @@ class LeapHandRot(VecTaskRot):
             
             if "sampled_pose_idx" in self.env_cfg:
                 sampled_pose_idx = np.ones(len(s_ids), dtype=np.int32) * self.env_cfg["sampled_pose_idx"]
+            elif self.env_cfg.get("sequential_pose_idx", False):
+                # Deterministic env↔row mapping (env i always restores cache row
+                # i mod len). Used by tools/filter_grasp_caches.py to attribute
+                # a drop to the specific cache row that caused it (pair with
+                # object_ids_from_cache so env i also holds row i's object).
+                sampled_pose_idx = s_ids.cpu().numpy() % self.saved_grasping_states[scale_key].shape[0]
+            elif scale_key in self.cache_rows_by_obj:
+                # Object-aware cache: each env samples only rows saved for the
+                # object instance it holds. A grasp is object-specific — restoring
+                # a rod grasp onto a puck leaves the fingers wrapping air.
+                pools = self.cache_rows_by_obj[scale_key]
+                env_oids = self.env_object_type_id[s_ids].cpu().numpy()
+                sampled_pose_idx = np.empty(len(s_ids), dtype=np.int64)
+                for oid in np.unique(env_oids):
+                    m = env_oids == oid
+                    pool = pools.get(int(oid))
+                    if pool is not None and len(pool) > 0:
+                        sampled_pose_idx[m] = np.random.choice(pool, size=int(m.sum()))
+                    else:  # no rows for this object — fall back to any row
+                        sampled_pose_idx[m] = np.random.randint(
+                            self.saved_grasping_states[scale_key].shape[0], size=int(m.sum()))
             else:
                 sampled_pose_idx = np.random.randint(self.saved_grasping_states[scale_key].shape[0], size=len(s_ids))
-            
-            sampled_pose = self.saved_grasping_states[scale_key][sampled_pose_idx].clone()
-            # print("Sampled pose idx?", sampled_pose_idx)
-            # print("sampled_pose?", sampled_pose)
-            # print("example object poses?", sampled_pose[0, 16:19])
-            self.root_state_tensor[self.object_indices[s_ids], :7] = sampled_pose[:, 16:]
+
+            sp = self.saved_grasping_states[scale_key][sampled_pose_idx]
+            if sp.shape[1] >= 40:
+                # v4 cache: [16 dof pos | 16 PD targets | 7 obj pose | 1 obj id].
+                # Restoring the TARGETS re-arms the grip: the PD error between the
+                # deflected finger positions and their held targets is the squeeze
+                # force. Restoring positions alone (targets := positions) leaves
+                # zero PD error → zero grip → force-closure grasps drop the object.
+                hand_pos, hand_tgt, obj_pose = sp[:, :16], sp[:, 16:32], sp[:, 32:39]
+            else:
+                # Legacy 23/24-col cache: positions double as targets. Sufficient
+                # only for palm/geometry-supported grasps.
+                hand_pos, hand_tgt, obj_pose = sp[:, :16], sp[:, :16], sp[:, 16:23]
+            self.root_state_tensor[self.object_indices[s_ids], :7] = obj_pose
             self.root_state_tensor[self.object_indices[s_ids], 7:13] = 0
-            
-            hand_pos = sampled_pose[:, :16]
+
             self.leap_hand_dof_pos[s_ids, :] = hand_pos
             self.leap_hand_dof_vel[s_ids, :] = 0
-            self.prev_targets[s_ids, :self.num_leap_hand_dofs] = hand_pos
-            self.cur_targets[s_ids, :self.num_leap_hand_dofs] = hand_pos
+            self.prev_targets[s_ids, :self.num_leap_hand_dofs] = hand_tgt
+            self.cur_targets[s_ids, :self.num_leap_hand_dofs] = hand_tgt
             self.init_pose_buf[s_ids, :] = hand_pos.clone()
-            self.object_init_pose_buf[s_ids, :] = sampled_pose[:, 16:].clone() 
+            self.object_init_pose_buf[s_ids, :] = obj_pose.clone()
 
         object_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor), gymtorch.unwrap_tensor(object_indices), len(object_indices))

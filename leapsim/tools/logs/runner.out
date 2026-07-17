@@ -1,0 +1,53 @@
+nohup: ignoring input
+warning: Failed to uninstall package at /root/odyssey/dexterousmanipulation/.venv/lib/python3.8/site-packages/rl_games.egg-info due to missing `top-level.txt` file. Installation may result in an incomplete environment.
+Uninstalled 2 packages in 3ms
+Installed 1 package in 9ms
+Families: 6 | scales: [0.95, 0.9, 1.0, 1.05, 1.1] | total jobs: 30 | already done: 0 | to run: 30
+Criterion: fingers>=3 @ >=1.0N, grace=0, search_radius=0.15, rerun=every 1500 steps
+  leap_hand_in_cuboid_heldout      caches 0/5 rot=[0.0, 0.0, 0.0]
+    s095:z=0.576/d=0.093, s09:z=0.574/d=0.090, s10:z=0.578/d=0.096, s105:z=0.580/d=0.099, s11:z=0.582/d=0.102
+  leap_hand_in_cuboid_train        caches 0/5 rot=[0.0, 0.0, 0.0]
+    s095:z=0.580/d=0.093, s09:z=0.578/d=0.090, s10:z=0.583/d=0.096, s105:z=0.585/d=0.099, s11:z=0.587/d=0.102
+  leap_hand_in_cylinder_heldout    caches 0/5 rot=[1.5708, 0.0, 0.0]
+    s095:z=0.580/d=0.085, s09:z=0.578/d=0.083, s10:z=0.583/d=0.088, s105:z=0.585/d=0.091, s11:z=0.587/d=0.093
+  leap_hand_in_cylinder_train      caches 0/5 rot=[1.5708, 0.0, 0.0]
+    s095:z=0.585/d=0.087, s09:z=0.583/d=0.084, s10:z=0.588/d=0.090, s105:z=0.590/d=0.092, s11:z=0.593/d=0.095
+  leap_hand_in_sphere_heldout      caches 0/5 rot=[0.0, 0.0, 0.0]
+    s095:z=0.580/d=0.078, s09:z=0.578/d=0.076, s10:z=0.583/d=0.080, s105:z=0.585/d=0.082, s11:z=0.587/d=0.085
+  leap_hand_in_sphere_train        caches 0/5 rot=[0.0, 0.0, 0.0]
+    s095:z=0.576/d=0.073, s09:z=0.574/d=0.071, s10:z=0.578/d=0.075, s105:z=0.580/d=0.077, s11:z=0.582/d=0.079
+
+Logging subprocess output to /root/odyssey/dexterousmanipulation/src/LEAP_Hand_Sim/leapsim/tools/logs/grasp_gen_20260711_180846.log
+
+[1/30] leap_hand_in_cuboid_heldout scale=0.95 ... OK (2269.9s)
+[2/30] leap_hand_in_cuboid_heldout scale=0.9 ... OK (2198.2s)
+[3/30] leap_hand_in_cuboid_heldout scale=1.0 ... OK (2309.6s)
+[4/30] leap_hand_in_cuboid_heldout scale=1.05 ... OK (2357.2s)
+[5/30] leap_hand_in_cuboid_heldout scale=1.1 ... OK (2331.1s)
+[6/30] leap_hand_in_cuboid_train scale=0.95 ... OK (2199.1s)
+[7/30] leap_hand_in_cuboid_train scale=0.9 ... OK (2161.7s)
+[8/30] leap_hand_in_cuboid_train scale=1.0 ... OK (2233.6s)
+[9/30] leap_hand_in_cuboid_train scale=1.05 ... OK (2255.5s)
+[10/30] leap_hand_in_cuboid_train scale=1.1 ... OK (2321.4s)
+[11/30] leap_hand_in_cylinder_heldout scale=0.95 ... OK (2411.5s)
+[12/30] leap_hand_in_cylinder_heldout scale=0.9 ... OK (2351.5s)
+[13/30] leap_hand_in_cylinder_heldout scale=1.0 ... OK (2465.4s)
+[14/30] leap_hand_in_cylinder_heldout scale=1.05 ... OK (2459.1s)
+[15/30] leap_hand_in_cylinder_heldout scale=1.1 ... OK (2508.6s)
+[16/30] leap_hand_in_cylinder_train scale=0.95 ... OK (2225.6s)
+[17/30] leap_hand_in_cylinder_train scale=0.9 ... OK (2200.9s)
+[18/30] leap_hand_in_cylinder_train scale=1.0 ... OK (2242.3s)
+[19/30] leap_hand_in_cylinder_train scale=1.05 ... OK (2266.9s)
+[20/30] leap_hand_in_cylinder_train scale=1.1 ... OK (2279.4s)
+[21/30] leap_hand_in_sphere_heldout scale=0.95 ... OK (2609.8s)
+[22/30] leap_hand_in_sphere_heldout scale=0.9 ... OK (2644.6s)
+[23/30] leap_hand_in_sphere_heldout scale=1.0 ... OK (2597.6s)
+[24/30] leap_hand_in_sphere_heldout scale=1.05 ... OK (2597.7s)
+[25/30] leap_hand_in_sphere_heldout scale=1.1 ... OK (2578.8s)
+[26/30] leap_hand_in_sphere_train scale=0.95 ... OK (3157.3s)
+[27/30] leap_hand_in_sphere_train scale=0.9 ... OK (3272.7s)
+[28/30] leap_hand_in_sphere_train scale=1.0 ... OK (3026.0s)
+[29/30] leap_hand_in_sphere_train scale=1.05 ... OK (3018.7s)
+[30/30] leap_hand_in_sphere_train scale=1.1 ... OK (2916.5s)
+
+Done. 30 caches present. Status: /root/odyssey/dexterousmanipulation/src/LEAP_Hand_Sim/leapsim/cache/_grasp_gen_status.json

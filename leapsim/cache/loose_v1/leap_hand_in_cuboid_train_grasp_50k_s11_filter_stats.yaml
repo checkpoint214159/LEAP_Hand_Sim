@@ -1,0 +1,8 @@
+family: cuboid_train
+filtered_at: '2026-07-08T12:19:56.109220'
+hold_steps: 400
+keep_rate_pct: 96.29
+kept_rows: 986
+raw_backup: cache/raw/leap_hand_in_cuboid_train_grasp_50k_s11.npy
+scale: 1.1
+total_rows: 1024

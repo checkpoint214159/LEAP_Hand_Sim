@@ -26,7 +26,13 @@ import trimesh
 class LeapHandGrasp(LeapHandRot):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture=None, force_render=None):
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless)
-        self.saved_grasping_states = torch.zeros((0, 23), dtype=torch.float, device=self.device)
+        # Rows: 16 DoF positions + 16 PD targets + 7 object pose + 1 object_type_id.
+        # Targets matter as much as positions: during settle the object deflects
+        # the fingers off their held targets, and that PD error IS the grip force
+        # (1-4 N). Restoring positions without targets leaves zero PD error → zero
+        # squeeze → force-closure grasps drop their object on restore. The id lets
+        # LeapHandRot restore rows only into envs holding the same object instance.
+        self.saved_grasping_states = torch.zeros((0, 40), dtype=torch.float, device=self.device)
 
         if "canonical_pose" in cfg["env"]:
             self.canonical_pose = cfg["env"]["canonical_pose"]
@@ -52,12 +58,36 @@ class LeapHandGrasp(LeapHandRot):
         self.min_contact_force: float = float(cfg["env"].get("min_contact_force", 0.5))
         self.max_contact_force: float = float(cfg["env"].get("max_contact_force", 50.0))
 
+        # Contact-criterion grace period: the N-finger contact condition is waived
+        # for the first `contact_grace_steps` steps of every episode so the object
+        # (which spawns airborne above the palm) can fall and settle before contact
+        # is demanded. Without this, num_contact_fingers > 0 kills every episode at
+        # step 1 — the hammer runs' ~0.002% yield.
+        self.contact_grace_steps: int = int(cfg["env"].get("contact_grace_steps", 0))
+
+        # Palm/proximal-contact exclusion: a grip the search certifies must be
+        # load-bearing through the DISTAL finger segments. If the object presses on
+        # any proximal hand body with more than this force [N], the episode fails
+        # (grace-gated like the finger condition). Set well below the object's
+        # weight (~0.3-0.7 N) so neither the palm nor the curled proximal phalanges
+        # can be a support surface; < 0 disables (upstream in-palm behavior).
+        # Palm-only exclusion is not enough: wide cuboids bridge across the curled
+        # mcp/pip segments with the palm itself untouched — a palm rest in all but
+        # name. Rotation training is unaffected — the policy may still use the palm.
+        self.max_palm_contact_force: float = float(cfg["env"].get("max_palm_contact_force", -1.0))
+        # Hand bodies treated as "proximal" (see robot.urdf link order):
+        #   0 palm_lower · 1/5/9 mcp_joint · 2/6/10 pip · 13 pip_4 · 14 thumb_pip
+        # Allowed load path: dip (3/7/11), thumb_dip (15), fingertips (4/8/12/16).
+        self.palm_contact_body_ids = set(
+            cfg["env"].get("palm_contact_bodies", [0, 1, 2, 5, 6, 9, 10, 13, 14]))
+
         # ── Per-episode stat accumulators (reset in reset_idx) ──────────────────
         N, F = self.num_envs, 4
         self._ep_force_max    = torch.zeros((N, F), dtype=torch.float32, device=self.device)
         self._ep_force_spike  = torch.zeros((N, F), dtype=torch.float32, device=self.device)
         self._ep_contact_steps = torch.zeros((N, F), dtype=torch.int32,   device=self.device)
         self._ep_dist_to_obj_center_min     = torch.full((N, F), 9999.0, dtype=torch.float32, device=self.device)
+        self._ep_palm_force_max = torch.zeros((N,), dtype=torch.float32, device=self.device)
 
         # ── Global accumulators for the final stats YAML ─────────────────────────
         self._gs_ep_count        = 0
@@ -66,6 +96,7 @@ class LeapHandGrasp(LeapHandRot):
         self._gs_spike_rate      = []
         self._gs_contact_fingers = []
         self._gs_dist_min        = []
+        self._gs_palm_force      = []
 
         self.x_unit_tensor = to_torch([1, 0, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.y_unit_tensor = to_torch([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
@@ -81,14 +112,16 @@ class LeapHandGrasp(LeapHandRot):
         # Surface distance at the moment best_pose was promoted (monotonic-ish).
         self._best_surf_per_env   = torch.full((N, F), 9999.0, dtype=torch.float32, device=self.device)
 
-        # ── Object mesh for surface-distance queries ───────────────────────────
-        asset_root      = Path(__file__).parent.parent.parent
-        primary_type    = self.object_type_list[0]
-        obj_urdf_path   = asset_root / self.asset_files_dict[primary_type]
-        verts, faces    = _load_object_mesh(obj_urdf_path)
-        obj_mesh        = trimesh.Trimesh(vertices=verts, faces=faces)
-        # Caches a KD-tree internally; reuse across episodes.
-        self.obj_proximity = trimesh.proximity.ProximityQuery(obj_mesh)
+        # ── Object meshes for surface-distance queries ─────────────────────────
+        # One mesh per object instance in the family: each env's fitness must be
+        # scored against the object that env actually holds, not object 0's mesh.
+        asset_root = Path(__file__).parent.parent.parent
+        self.obj_proximity_by_type = []
+        for obj_type in self.object_type_list:
+            verts, faces = _load_object_mesh(asset_root / self.asset_files_dict[obj_type])
+            mesh = trimesh.Trimesh(vertices=verts, faces=faces)
+            # ProximityQuery caches a KD-tree internally; reuse across episodes.
+            self.obj_proximity_by_type.append(trimesh.proximity.ProximityQuery(mesh))
 
         # Per-fingertip pad point in LINK-LOCAL frame. NOT in mesh frame — each
         # fingertip link has a <visual><origin xyz rpy> that transforms the STL
@@ -167,10 +200,14 @@ class LeapHandGrasp(LeapHandRot):
                 'max_contact_force_N':    self.max_contact_force,
                 'num_contact_fingers':    int(self.num_contact_fingers),
                 'finger_dist_threshold_m': self.finger_dist_threshold,
+                'contact_grace_steps':    int(self.contact_grace_steps),
+                'max_palm_contact_force_N': float(self.max_palm_contact_force),
+                'palm_contact_bodies':    sorted(int(b) for b in self.palm_contact_body_ids),
             },
             'force': {
                 'mean_ep_max_valid_N': round(float(np.mean(self._gs_force_max))  if self._gs_force_max  else 0.0, 3),
                 'mean_spike_rate_pct': round(float(np.mean(self._gs_spike_rate)) * 100 if self._gs_spike_rate else 0.0, 2),
+                'mean_ep_max_palm_N':  round(float(np.mean(self._gs_palm_force)) if self._gs_palm_force else 0.0, 3),
             },
             'contact': {
                 'mean_fingers_at_ep_end': round(float(np.mean(self._gs_contact_fingers)) if self._gs_contact_fingers else 0.0, 3),
@@ -218,7 +255,10 @@ class LeapHandGrasp(LeapHandRot):
 
         success = self.progress_buf[env_ids] == self.max_episode_length
         all_states = torch.cat([
-            self.leap_hand_dof_pos, self.root_state_tensor[self.object_indices, :7]
+            self.leap_hand_dof_pos,
+            self.cur_targets[:, :self.num_leap_hand_dofs],
+            self.root_state_tensor[self.object_indices, :7],
+            self.env_object_type_id.float().unsqueeze(1),
         ], dim=1)
         self.saved_grasping_states = torch.cat([self.saved_grasping_states, all_states[env_ids][success]])
 
@@ -244,7 +284,12 @@ class LeapHandGrasp(LeapHandRot):
         mean_fingers = (ep_steps > 0).float().sum(dim=-1).mean().item()
         mean_force   = ep_force.max(dim=-1).values.mean().item()
         spike_rate   = ((ep_spike > self.max_contact_force) & (ep_steps > 0)).float().mean().item()
-        mean_dist    = ep_dist_to_obj_center.clamp(max=9998.0).mean().item()
+        # Mask the 9999 init sentinel: the very first reset batch (all envs, before
+        # any physics step) otherwise poisons the running mean — one 9998 across
+        # ~570 batches is how "mean_min_fingertip_dist_m: 17.6" happens.
+        _valid_dist  = ep_dist_to_obj_center[ep_dist_to_obj_center < 9000.0]
+        mean_dist    = _valid_dist.mean().item() if _valid_dist.numel() > 0 else float('nan')
+        mean_palm    = self._ep_palm_force_max[env_ids].mean().item()
         # Two surface-distance metrics:
         #   surf_now:  this batch's noisy attempts (high variance, can wander)
         #   surf_best: averaged BEST-pose surf across all envs (the real signal)
@@ -258,7 +303,9 @@ class LeapHandGrasp(LeapHandRot):
         self._gs_force_max.append(mean_force)
         self._gs_spike_rate.append(spike_rate)
         self._gs_contact_fingers.append(mean_fingers)
-        self._gs_dist_min.append(mean_dist)
+        if not np.isnan(mean_dist):
+            self._gs_dist_min.append(mean_dist)
+        self._gs_palm_force.append(mean_palm)
 
         sr = 100.0 * self._gs_success_count / max(1, self._gs_ep_count)
         print(
@@ -267,9 +314,10 @@ class LeapHandGrasp(LeapHandRot):
             f'success={self._gs_success_count} ({sr:.1f}%) | '
             f'fingers={mean_fingers:.2f}/4 | '
             f'force={mean_force:.2f}N | '
+            f'palm={mean_palm:.2f}N | '
             f'spike={100*spike_rate:.1f}% | '
-            f'surf_now={mean_surf_now*1000:.1f}mm | '
-            f'surf_best={mean_surf_best*1000:.1f}mm | '
+            f'surface_now={mean_surf_now*1000:.1f}mm | '
+            f'surface_best={mean_surf_best*1000:.1f}mm | '
             f'best_fit={best_score:.2f}'
         )
 
@@ -281,6 +329,7 @@ class LeapHandGrasp(LeapHandRot):
             exit()
 
         # ── Reset per-episode accumulators for these envs ──────────────────────
+        self._ep_palm_force_max[env_ids] = 0.0
         self._ep_force_max[env_ids]     = 0.0
         self._ep_force_spike[env_ids]   = 0.0
         self._ep_contact_steps[env_ids] = 0
@@ -362,13 +411,20 @@ class LeapHandGrasp(LeapHandRot):
         scales = self._obj_scales_t[env_ids].view(-1, 1, 1)               # [n, 1, 1]
         tip_local_unscaled = tip_local / scales
 
-        # Query trimesh — CPU, batched in one call. Use UNSIGNED distance
+        # Query trimesh — CPU, batched per object type. Use UNSIGNED distance
         # because the hammer URDF (cylinder + box concatenated) is not a
         # closed manifold, so signed_distance gives unreliable signs at the
         # cylinder-box junction. Penetration is detected separately via the
         # contact-force tensor (large forces ⇒ PhysX is depenetrating).
-        pts_np = tip_local_unscaled.reshape(-1, 3).cpu().numpy()
-        _, dists_np, _ = trimesh.proximity.closest_point(self.obj_proximity._mesh, pts_np)
+        # Each env is queried against the mesh of the object IT holds.
+        pts_np = tip_local_unscaled.reshape(-1, 3).cpu().numpy()      # [n*4, 3]
+        env_oids = self.env_object_type_id[env_ids].cpu().numpy()     # [n]
+        dists_np = np.empty(pts_np.shape[0], dtype=np.float64)
+        for oid in np.unique(env_oids):
+            pt_mask = np.repeat(env_oids == oid, 4)
+            _, d, _ = trimesh.proximity.closest_point(
+                self.obj_proximity_by_type[int(oid)]._mesh, pts_np[pt_mask])
+            dists_np[pt_mask] = d
 
         # Convert back to world units (multiply by scale).
         dists = torch.from_numpy(dists_np).to(self.device, dtype=torch.float32)
@@ -392,6 +448,7 @@ class LeapHandGrasp(LeapHandRot):
           contact term  :  3 N × 4 fingers         = +12.0  ← rewards real touch
           duration term :  0.5 × 4 fingers         = +2.0   ← rewards stable hold
           spike penalty :  -1 to -4                          ← penalizes penetration
+          palm penalty  :  -4 × palm N (≤2.5)      = 0..-10  ← steers away from palm rests
         Proximity has to be expensive enough that a "1 finger jabbing, others
         flailing" pose loses to a "4 fingers near surface, light touch" pose.
         """
@@ -403,8 +460,14 @@ class LeapHandGrasp(LeapHandRot):
         contact     = self._ep_force_max[env_ids].clamp(max=10).sum(-1)
         contact_dur = self._ep_contact_steps[env_ids].float().sum(-1) / self.max_episode_length
         spike_pen   = -(self._ep_force_spike[env_ids] > self.max_contact_force).float().sum(-1)
+        # Palm penalty only when the exclusion is active: a resting object bears
+        # ~its weight (0.3-0.7 N) on the palm → -1.2..-2.8, comparable to losing a
+        # fingertip's proximity credit, so the hill-climb prefers fingertip cages.
+        palm_pen = torch.zeros_like(spike_pen)
+        if self.max_palm_contact_force >= 0.0:
+            palm_pen = -self._ep_palm_force_max[env_ids].clamp(max=2.5)
 
-        return proximity + 1.0 * contact + 4.0 * contact_dur + 2.0 * spike_pen
+        return proximity + 1.0 * contact + 4.0 * contact_dur + 2.0 * spike_pen + 4.0 * palm_pen
 
 
 
@@ -434,14 +497,19 @@ class LeapHandGrasp(LeapHandRot):
         # fingertip_raw_force: raw accumulated force — used to detect penetration spikes.
         # Uses get_env_rigid_contacts because body indices are local (0..N-1) in the
         # per-env API. The sim-wide get_rigid_contacts uses opaque handles, not indices.
+        # Force magnitude comes from the contact's own 'lambda' field (per-contact
+        # normal force). get_env_rigid_contact_forces is PER-RIGID-BODY (net force,
+        # one Vec3 per body) — zipping it against the per-contact-pair array
+        # attributed arbitrary bodies' net forces to fingertip contacts.
         fingertip_obj_force: torch.Tensor = torch.zeros((self.num_envs, 4), dtype=torch.float32, device=self.device)
         fingertip_raw_force: torch.Tensor = torch.zeros((self.num_envs, 4), dtype=torch.float32, device=self.device)
+        palm_obj_force: torch.Tensor = torch.zeros((self.num_envs,), dtype=torch.float32, device=self.device)
         fingertip_idx_to_col = {4: 0, 8: 1, 12: 2, 16: 3}
+        proximal_ids = self.palm_contact_body_ids  # palm + mcp/pip segments + thumb base
 
         for env_idx, env in enumerate(self.envs):
             contacts: np.ndarray = self.gym.get_env_rigid_contacts(env)
-            forces: np.ndarray   = self.gym.get_env_rigid_contact_forces(env)
-            for c, f in zip(contacts, forces):
+            for c in contacts:
                 local0: int = int(c['body0'])
                 local1: int = int(c['body1'])
                 is_ft_obj = (local0 == obj_local_id and local1 in fingertip_local_ids)
@@ -449,10 +517,13 @@ class LeapHandGrasp(LeapHandRot):
                 if is_ft_obj or is_obj_ft:
                     finger_local: int = local1 if is_ft_obj else local0
                     col: int = fingertip_idx_to_col[finger_local]
-                    raw_mag: float = float(np.sqrt(f['x']**2 + f['y']**2 + f['z']**2))
+                    raw_mag: float = abs(float(c['lambda']))
                     fingertip_raw_force[env_idx, col] += raw_mag
                     if raw_mag <= self.max_contact_force:
                         fingertip_obj_force[env_idx, col] += raw_mag
+                elif (local0 == obj_local_id and local1 in proximal_ids) or \
+                     (local1 == obj_local_id and local0 in proximal_ids):
+                    palm_obj_force[env_idx] += abs(float(c['lambda']))
 
         # ── Update per-episode accumulators ───────────────────────────────────
         self._ep_force_max    = torch.maximum(self._ep_force_max,   fingertip_obj_force)
@@ -461,17 +532,30 @@ class LeapHandGrasp(LeapHandRot):
         self._ep_contact_steps += contacted_this_step.int()
         dists: torch.Tensor = torch.sqrt(((obj_pos - finger_pos) ** 2).sum(-1))  # [N, 4]
         self._ep_dist_to_obj_center_min = torch.minimum(self._ep_dist_to_obj_center_min, dists)
+        self._ep_palm_force_max = torch.maximum(self._ep_palm_force_max, palm_obj_force)
 
-        # ── Three-condition success criterion ──────────────────────────────────
+        # ── Success criterion ──────────────────────────────────────────────────
         # 1) All fingertips are within finger_dist_threshold of the object centre
         cond1: torch.Tensor = (dists < self.finger_dist_threshold).all(-1)
-        # 2) At least num_contact_fingers fingertips exert force within the valid window
+        # 2) At least num_contact_fingers fingertips exert force within the valid window.
+        #    Waived during the settle grace period (object is still falling onto the palm).
         contacting_count: torch.Tensor = contacted_this_step.sum(dim=-1)
         cond2: torch.Tensor = contacting_count >= self.num_contact_fingers
+        if self.contact_grace_steps > 0:
+            cond2 = torch.logical_or(cond2, self.progress_buf < self.contact_grace_steps)
         # 3) Object has not fallen below the drop threshold
         cond3: torch.Tensor = torch.greater(obj_pos[:, -1, -1], self.reset_z_threshold)
 
         cond = cond1.float() * cond2.float() * cond3.float()
+
+        # 4) Object is not resting on the palm: palm-object force stays under the
+        #    limit once the grace period ends. Fingertip-borne grips only.
+        if self.max_palm_contact_force >= 0.0:
+            cond4 = palm_obj_force <= self.max_palm_contact_force
+            if self.contact_grace_steps > 0:
+                cond4 = torch.logical_or(cond4, self.progress_buf < self.contact_grace_steps)
+            cond = cond * cond4.float()
+
         self.reset_buf[cond < 1] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length] = 1
 

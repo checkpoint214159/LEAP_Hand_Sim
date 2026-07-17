@@ -1,0 +1,8 @@
+family: cylinder_train
+filtered_at: '2026-07-08T12:49:50.811434'
+hold_steps: 400
+keep_rate_pct: 85.84
+kept_rows: 879
+raw_backup: cache/raw/leap_hand_in_cylinder_train_grasp_50k_s10.npy
+scale: 1.0
+total_rows: 1024

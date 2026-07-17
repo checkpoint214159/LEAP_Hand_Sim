@@ -1,0 +1,8 @@
+family: sphere_heldout
+filtered_at: '2026-07-08T12:52:53.434446'
+hold_steps: 400
+keep_rate_pct: 89.55
+kept_rows: 917
+raw_backup: cache/raw/leap_hand_in_sphere_heldout_grasp_50k_s105.npy
+scale: 1.05
+total_rows: 1024

@@ -1,0 +1,8 @@
+family: cylinder_heldout
+filtered_at: '2026-07-08T12:20:43.371595'
+hold_steps: 400
+keep_rate_pct: 87.89
+kept_rows: 900
+raw_backup: cache/raw/leap_hand_in_cylinder_heldout_grasp_50k_s095.npy
+scale: 0.95
+total_rows: 1024

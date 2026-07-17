@@ -1,0 +1,8 @@
+family: sphere_train
+filtered_at: '2026-07-08T12:55:24.344188'
+hold_steps: 400
+keep_rate_pct: 92.38
+kept_rows: 946
+raw_backup: cache/raw/leap_hand_in_sphere_train_grasp_50k_s105.npy
+scale: 1.05
+total_rows: 1024

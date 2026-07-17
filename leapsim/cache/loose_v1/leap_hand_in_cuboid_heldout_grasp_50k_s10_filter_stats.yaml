@@ -1,0 +1,8 @@
+family: cuboid_heldout
+filtered_at: '2026-07-08T12:08:14.015456'
+hold_steps: 400
+keep_rate_pct: 97.07
+kept_rows: 994
+raw_backup: cache/raw/leap_hand_in_cuboid_heldout_grasp_50k_s10.npy
+scale: 1.0
+total_rows: 1024
