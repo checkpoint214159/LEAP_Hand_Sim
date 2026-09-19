@@ -1,0 +1,28 @@
+contact:
+  mean_fingers_at_ep_end: 1.791
+contact_criterion:
+  contact_grace_steps: 15
+  finger_dist_threshold_m: 0.0964
+  max_contact_force_N: 50.0
+  max_palm_contact_force_N: 0.1
+  min_contact_force_N: 1.0
+  num_contact_fingers: 3
+  palm_contact_bodies:
+  - 0
+  - 1
+  - 2
+  - 5
+  - 6
+  - 9
+  - 10
+  - 13
+  - 14
+distance:
+  mean_min_fingertip_dist_m: 0.0771
+force:
+  mean_ep_max_palm_N: 7.075
+  mean_ep_max_valid_N: 9.053
+  mean_spike_rate_pct: 0.14
+success_rate_pct: 0.15
+successful_grasps: 120
+total_episodes: 77474

@@ -17,6 +17,8 @@ from leapsim.learning import amp_continuous, amp_models, amp_network_builder, am
 from leapsim.learning import td3_agent, td3_models, td3_network_builder, td3_players
 from leapsim.learning import sac_agent
 from leapsim.learning import sapg_agent, sapg_players
+from leapsim.learning import local_z_network_builder
+from leapsim.learning import z1_z_network_builder
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +59,24 @@ class CustomRunner(Runner):
             'sapg', lambda **kwargs: sapg_agent.SAPGAgent(**kwargs))
         self.player_factory.register_builder(
             'sapg', lambda **kwargs: sapg_players.SAPGPlayerContinuous(**kwargs))
+
+        # local_z: RMA/HORA-style tiny jointly-trained encoder on top of
+        # task.env.z_mode=local's raw per-fingertip feature (see
+        # learning/local_z_network_builder.py). Reuses the stock a2c_continuous
+        # algo/player/model (continuous_a2c_logstd) unchanged — only the
+        # NETWORK builder differs, so no algo_factory/player_factory
+        # registration is needed, just the network name.
+        model_builder.register_network(
+            'local_z', lambda **kwargs: local_z_network_builder.LocalZBuilder())
+
+        # z1_z: the LEARNED-GLOBAL control — the SAME RMA/HORA-style tiny
+        # encoder as local_z, but on task.env.z_mode=z1's static/global 8-d
+        # analytic-shape feature instead of the dynamic-local one (see
+        # learning/z1_z_network_builder.py). Decides encoder-only vs
+        # encoder+locality for the 2x2. Reuses the stock a2c_continuous
+        # algo/player/model unchanged — only the network name differs.
+        model_builder.register_network(
+            'z1_z', lambda **kwargs: z1_z_network_builder.Z1EncBuilder())
 
     def run_train(self, args: Dict[str, Any]) -> None:
         logger.info("======= TRAINING COMMENCED =======")

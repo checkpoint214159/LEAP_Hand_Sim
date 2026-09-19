@@ -1,0 +1,93 @@
+# --------------------------------------------------------
+# LeapHandRotBC — behaviour-cloning student network config (policy distillation).
+#
+# Identical to LeapHandRotPPO EXCEPT the `rnn:` block is removed: the distilled
+# student is a NON-RECURRENT MLP (see tools/run_distill.sh "design decisions").
+# The 3-step observation history already gives the MLP short-horizon context, so
+# a feed-forward student is a legitimate first cut that keeps behaviour cloning
+# a plain per-sample regression (no BPTT). Everything else — units, activation,
+# fixed_sigma, normalize_input/value, minibatch — is kept identical so the same
+# config block resolves and the stock rl_games player can load a student saved
+# by tools/distill_bc_train.py (`test=true train=LeapHandRotBC checkpoint=...`).
+# --------------------------------------------------------
+
+params:
+  seed: ${...seed}
+
+  algo:
+    name: a2c_continuous
+
+  model:
+    name: continuous_a2c_logstd
+
+  network:
+    name: actor_critic
+    separate: False
+
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: default
+        sigma_init:
+          name: const_initializer
+          val: 0
+        fixed_sigma: True
+
+    mlp:
+      units: [512, 256, 128]
+      activation: elu
+      d2rl: False
+
+      initializer:
+        name: default
+      regularizer:
+        name: None
+    # NOTE: no `rnn:` block on purpose — MLP student.
+
+  load_checkpoint: ${if:${...checkpoint},True,False}
+  load_path: ${...checkpoint}
+
+  config:
+    name: ${resolve_default:LeapHandBC,${....experiment}}
+    full_experiment_name: ${.name}
+    train_dir: ${....runs_dir}
+    env_name: rlgpu
+    multi_gpu: False
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_value: True
+    value_bootstrap: True
+    num_actors: ${....task.env.numEnvs}
+    reward_shaper:
+      scale_value: 0.01
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: 5e-3
+    lr_schedule: adaptive
+    schedule_type: standard
+    kl_threshold: 0.02
+    score_to_win: 100000
+    max_epochs: ${resolve_default:5000,${....max_iterations}}
+    save_best_after: 100
+    save_frequency: 200
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 32
+    minibatch_size: 32768
+    mini_epochs: 5
+    critic_coef: 4
+    clip_value: true
+    seq_len: 4
+    bounds_loss_coef: 0.0001
+
+    player:
+      deterministic: True
+      games_num: 100000
+      print_stats: True

@@ -43,6 +43,20 @@ def _object_shape_for(obj_type: str) -> ObjectShape:
     return _OBJECT_SHAPES.get(obj_type, ('box', (0.04, 0.04, 0.04)))
 
 
+# Fingertip rigid-body link indices (index, thumb, middle, ring), matching the
+# convention already used in leap_hand_grasp.py's contact/proximity code.
+FINGERTIP_LOCAL_IDS = [4, 8, 12, 16]
+
+# z_mode='local' shape-family ids (parsed from the object_type_list name prefix).
+_SHAPE_FAMILY_ID = {'cuboid': 0, 'box': 0, 'cylinder': 1, 'sphere': 2, 'cone': 3, 'capsule': 4}
+
+# Procedural primitive categories _setup_object_info discovers via
+# <assets>/<category>/<subset>/*.urdf (tools/gen_primitive_objects.py).
+# Adding a new category (e.g. a future 'pyramid') means adding it here AND to
+# _SHAPE_FAMILY_ID/_closest_point_and_normal_local if it needs z_mode=local.
+_PRIMITIVE_FAMILY_CATEGORIES = ['cuboid', 'cylinder', 'sphere', 'cone', 'capsule']
+
+
 class LeapHandRot(VecTaskRot):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture=None, force_render=None):
         # ── 1. Pre-super-init: config must be parsed before VecTask.__init__ ─────
@@ -60,9 +74,12 @@ class LeapHandRot(VecTaskRot):
         self.reset_z_threshold = self.env_cfg['reset_height_threshold']
         self.grasp_cache_name = self.env_cfg['grasp_cache_name']
         self.evaluate = self.cfg['on_evaluation']
+        self._setup_z_channel()  # oracle shape prior z (Stage-1 C / Stage-2); grows numObservations pre-super
 
         # ── 2. Sim creation (calls _create_envs internally) ──────────────────────
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless)
+        if self.z_dim > 0:
+            self._build_z_features()  # static per-env z vector (needs env_object_type_id + obj_scales)
 
         # ── 3. Post-super-init: viewer, timing ───────────────────────────────────
         self.record_video = self.env_cfg.get('record_video', False)
@@ -235,17 +252,53 @@ class LeapHandRot(VecTaskRot):
 
         # ── 11. Rerun visualizer ──────────────────────────────────────────────────
         rr_cfg = self.env_cfg.get('rerun', {})
-        self._rr_env_idx = int(rr_cfg.get('env_idx', 0))
         self._rerun_vis: RerunVisualizer | None = None
         asset_root   = Path(__file__).parent.parent.parent
         self.hand_urdf_path    = asset_root / self.env_cfg['asset']['handAsset']
         object_shape = _object_shape_for(self.env_cfg['object']['type'])
-        primary_type = self.object_type_list[0]
-        self.obj_urdf_path = asset_root / self.asset_files_dict[primary_type]
+
+        # Rerun records ONE env per window, so to view a healthy sample of objects
+        # we ROTATE the observed env across windows (round-robin) instead of
+        # perturbing the sim RNG (which would break training reproducibility and
+        # still only stream one object per run). Default: one env per distinct
+        # object id (covers every instance held in the run). Overrides:
+        # rerun.env_indices=[...] for an explicit set, or sample_per_object=false
+        # + env_idx=N for a single fixed env.
+        ids_np = self.env_object_type_id.cpu().numpy()
+        if rr_cfg.get('env_indices', None) is not None:
+            self._rr_env_indices = [int(i) for i in rr_cfg['env_indices']]
+        elif rr_cfg.get('sample_per_object', True):
+            self._rr_env_indices = [int(np.where(ids_np == o)[0][0])
+                                    for o in range(len(self.object_type_list))
+                                    if (ids_np == o).any()]
+        else:
+            self._rr_env_indices = [int(rr_cfg.get('env_idx', 0))]
+
+        # Per-slot metadata: render each observed env's ACTUAL object instance at
+        # its own actor scale. Rendering obj_0's mesh for every env (the old bug)
+        # shows an imposter shape — fingers appear to grip mid-air around a
+        # floating wrong-shaped object.
+        observed = []
+        for idx in self._rr_env_indices:
+            oid   = int(self.env_object_type_id[idx].item())
+            otype = self.object_type_list[oid]
+            if self.randomize_scale and self.obj_scales.numel() == self.num_envs:
+                oscale = float(self.obj_scales[idx].item())
+            else:
+                oscale = float(self.base_obj_scale)
+            observed.append(dict(env_idx=idx, object_id=oid, object_type=otype,
+                                 object_urdf=asset_root / self.asset_files_dict[otype],
+                                 object_scale=oscale))
+
         if rr_cfg.get('enabled', False):
             hand_handle  = self.gym.find_actor_handle(self.envs[0], 'hand')
             link_names   = self.gym.get_actor_rigid_body_names(self.envs[0], hand_handle)
-            self._rerun_vis = RerunVisualizer(rr_cfg, self.hand_urdf_path, link_names, object_shape, self.obj_urdf_path)
+            print(f"[rerun] streaming {len(observed)} env(s), one per window (round-robin):")
+            for s in observed:
+                print(f"[rerun]   env {s['env_idx']:5d} → '{s['object_type']}' "
+                      f"(id {s['object_id']}) @ scale {s['object_scale']:.3f}")
+            self._rerun_vis = RerunVisualizer(rr_cfg, self.hand_urdf_path, link_names,
+                                              object_shape, observed)
 
     def set_camera(self, position, lookat):
         """ 
@@ -504,6 +557,17 @@ class LeapHandRot(VecTaskRot):
                 print(f"[object_ids_from_cache] {self.env_cfg['object_ids_from_cache']} "
                       f"has no object-id column (23-col legacy cache); ignoring.")
 
+        # object_id_whitelist restricts which instances of the family envs may
+        # hold (e.g. [1] → every env holds cuboid_1: single-object control runs).
+        # Ids stay family-relative, so cache row matching keeps working.
+        id_whitelist = self.env_cfg.get("object_id_whitelist", None)
+        if id_whitelist is not None:
+            id_whitelist = [int(x) for x in id_whitelist]
+            assert all(0 <= x < len(self.object_type_list) for x in id_whitelist), \
+                f"object_id_whitelist {id_whitelist} out of range for {self.object_type_list}"
+            print(f"[object_id_whitelist] envs restricted to ids {id_whitelist} "
+                  f"({[self.object_type_list[x] for x in id_whitelist]})")
+
         # ── Per-env creation loop ─────────────────────────────────────────────
         for i in range(num_envs):
             env_ptr = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -520,6 +584,8 @@ class LeapHandRot(VecTaskRot):
             # Object actor
             if forced_ids is not None:
                 object_type_id = int(forced_ids[i % len(forced_ids)])
+            elif id_whitelist is not None:
+                object_type_id = id_whitelist[i % len(id_whitelist)]  # round-robin: exact balance
             else:
                 object_type_id = np.random.choice(len(self.object_type_list), p=self.object_type_prob)
             env_object_type_id.append(int(object_type_id))
@@ -578,6 +644,14 @@ class LeapHandRot(VecTaskRot):
 
         # ── Post-loop: convert index lists to tensors ─────────────────────────
         self.env_object_type_id = to_torch(env_object_type_id, dtype=torch.long, device=self.device)
+        # [obj-sampling diag] ground-truth per-object env distribution. If every
+        # env holds the same id this print collapses to one bucket — that would be
+        # a real sampling bug. A ~even spread confirms diverse loading; Rerun still
+        # only streams env `rerun.env_idx` (default 0), so a single run's replay
+        # shows just that one env's object (fixed by seed) — not all of them.
+        _hist = {self.object_type_list[o]: int((self.env_object_type_id == o).sum().item())
+                 for o in range(len(self.object_type_list))}
+        print(f"[obj-sampling diag] {self.num_envs} envs → per-object counts: {_hist}")
         self.obj_scales         = torch.tensor(self.obj_scales, device=self.device)
         self.object_init_state  = to_torch(self.object_init_state, device=self.device, dtype=torch.float).view(self.num_envs, 13)
         self.object_rb_handles  = to_torch(self.object_rb_handles, dtype=torch.long, device=self.device)
@@ -598,7 +672,12 @@ class LeapHandRot(VecTaskRot):
             )
     
     def reset_idx(self, env_ids):
-        if self.randomize_mass:
+        if self.env_cfg.get("skip_mass_props", False):
+            # Diagnostic: skip ALL per-actor property calls in reset (both
+            # branches touch get_actor_rigid_body_properties, which interferes
+            # with tensor-API state applies on the GPU pipeline).
+            pass
+        elif self.randomize_mass:
             lower, upper = self.randomize_mass_lower, self.randomize_mass_upper
 
             for env_id in env_ids:
@@ -683,18 +762,52 @@ class LeapHandRot(VecTaskRot):
             self.init_pose_buf[s_ids, :] = hand_pos.clone()
             self.object_init_pose_buf[s_ids, :] = obj_pose.clone()
 
-        object_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
-        self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor), gymtorch.unwrap_tensor(object_indices), len(object_indices))
-        hand_indices = self.hand_indices[env_ids].to(torch.int32)
-        self.gym.set_dof_position_target_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.prev_targets), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
-        self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.dof_state), gymtorch.unwrap_tensor(hand_indices), len(env_ids))
+        # FULL-tensor applies, NOT the *_indexed variants: calling
+        # get/set_actor_rigid_body_properties (the mass-randomization loop above)
+        # in the same step silently breaks set_actor_root_state_tensor_indexed on
+        # the GPU pipeline — the staged rows never reach the sim, so cache
+        # restores no-op'd (objects stayed at creation pose) in every GPU run
+        # while CPU-pipeline runs restored fine. The full-tensor calls are immune
+        # (minimal repro: tools/probe_minimal_setter.py gpu massset). Semantics
+        # are equivalent: the tensors hold refreshed current state for non-reset
+        # envs and the staged restore for reset ones.
+        self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.prev_targets))
+        self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(self.dof_state))
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor))
+        # The applies above are POISONED on the GPU pipeline whenever
+        # get/set_actor_rigid_body_properties ran this step (the mass loop at the
+        # top of this method — both branches!): the staged state never reaches
+        # the sim, so cache restores silently no-op'd in every GPU run ever
+        # (objects stayed at creation pose) while CPU-pipeline runs were fine.
+        # Repro: tools/probe_minimal_setter.py gpu massset, and
+        # tools/probe_restore_orientation.py DIRECT ±skip_mass_props.
+        # Fix: re-apply in update_low_level_control at substep 1 of the next
+        # step — the first simulate clears the poison, and no property calls or
+        # refreshes run in between, so the tensors still hold the staged rows.
+        self._reapply_countdown = 2
+        self._reapply_obj_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
+        self._reapply_hand_indices = self.hand_indices[env_ids].to(torch.int32)
 
         mask = self.progress_buf[env_ids] > 0
-        self.object_angvel_finite_diff_ep_buf.extend(list(self.object_angvel_finite_diff_mean[env_ids][mask]))
+        done_vals = self.object_angvel_finite_diff_mean[env_ids][mask]
+        self.object_angvel_finite_diff_ep_buf.extend(list(done_vals))
+        # per-category angvel accumulation (eval diagnostic: reveals whether an
+        # easy family — spheres — is masking a hard one in the mix aggregate)
+        if "print_object_angvel" in self.env_cfg:
+            if not hasattr(self, "_angvel_cat_acc"):
+                self._env_family = [self.object_type_list[int(o)].rsplit('_', 1)[0]
+                                    for o in self.env_object_type_id.cpu().numpy()]
+                self._angvel_cat_acc = {}
+            for e, v in zip(env_ids[mask].cpu().numpy(), done_vals.detach().cpu().numpy()):
+                fam = self._env_family[int(e)]
+                s, c = self._angvel_cat_acc.get(fam, (0.0, 0))
+                self._angvel_cat_acc[fam] = (s + float(v), c + 1)
         self.object_angvel_finite_diff_mean[env_ids] = 0
 
         if "print_object_angvel" in self.env_cfg and len(self.object_angvel_finite_diff_ep_buf) > 0:
-            print("mean object angvel: ", sum(self.object_angvel_finite_diff_ep_buf) / len(self.object_angvel_finite_diff_ep_buf))
+            overall = sum(self.object_angvel_finite_diff_ep_buf) / len(self.object_angvel_finite_diff_ep_buf)
+            percat = {f: round(s / c, 4) for f, (s, c) in sorted(self._angvel_cat_acc.items())}
+            print("mean object angvel: ", overall, " | per-category:", percat)
 
         self.progress_buf[env_ids] = 0
         self.obs_buf[env_ids] = 0
@@ -731,7 +844,11 @@ class LeapHandRot(VecTaskRot):
         return tensor
 
     def compute_observations(self):
-        self._refresh_gym()
+        # NO _refresh_gym here. post_physics_step already refreshed at its top,
+        # and this method runs AFTER reset_idx: refreshing would overwrite the
+        # rows reset_idx just staged, which must survive untouched until the
+        # substep-1 re-apply in update_low_level_control (the fix for the GPU
+        # property-call poison — see reset_idx).
         # deal with normal observation, do sliding window
         prev_obs_buf = self.obs_buf_lag_history[:, 1:].clone()
         joint_noise_matrix = self.get_joint_noise()
@@ -804,6 +921,16 @@ class LeapHandRot(VecTaskRot):
         if "phase_period" in self.env_cfg:
             cur_obs_buf = torch.cat([cur_obs_buf, self.phase[:, None]], dim=-1)
 
+        # Oracle shape prior z (Stage-1 C / Stage-2). z0/z1 are static per episode;
+        # 'local' is recomputed fresh every call (see _current_z). Either way it
+        # rides the obs history like include_obj_scales (appended per-step, then
+        # stacked across the 3-step window). z_dim==0 (z_mode=none) is a no-op →
+        # identical to the proprio baseline.
+        if self.z_dim > 0:
+            self._z_obs_start = cur_obs_buf.shape[-1]
+            z_now = self._current_z()
+            cur_obs_buf = torch.cat([cur_obs_buf, z_now[:, None, :]], dim=-1)
+
         if self.env_cfg["include_history"]:
             at_reset_env_ids = self.at_reset_buf.nonzero(as_tuple=False).squeeze(-1)
             self.obs_buf_lag_history[:] = torch.cat([prev_obs_buf, cur_obs_buf], dim=1)
@@ -816,6 +943,16 @@ class LeapHandRot(VecTaskRot):
 
             if self.env_cfg["include_targets"]:
                 self.obs_buf_lag_history[at_reset_env_ids, :, 16:32] = self.leap_hand_dof_pos[at_reset_env_ids].unsqueeze(1)
+
+            # keep z correct in the freshly-reset history frames — z encodes the
+            # object's shape/contact state, so stale z for the first 3 steps would
+            # feed the wrong value at episode start. Reuses z_now (computed once
+            # above, not recomputed) — for 'local' this is "current config repeated
+            # 3x," the only sensible fill since there's no meaningful pre-episode value.
+            if self.z_dim > 0:
+                zs = self._z_obs_start
+                self.obs_buf_lag_history[at_reset_env_ids, :, zs:zs + self.z_dim] = \
+                    z_now[at_reset_env_ids].unsqueeze(1)
             
             t_buf = (self.obs_buf_lag_history[:, -3:].reshape(self.num_envs, -1)).clone() # attach three timesteps of history
 
@@ -924,18 +1061,40 @@ class LeapHandRot(VecTaskRot):
             self._capture_frame()
 
         if self._rerun_vis is not None:
-            idx = self._rr_env_idx
-            rb = self.rigid_body_states[idx, :self.num_leap_hand_bodies].cpu().numpy()
-            self._rerun_vis.tick(RerunFrame(
-                rb_states=rb,
-                obj_pos=self.object_pos[idx].cpu().numpy(),
-                obj_rot=self.object_rot[idx].cpu().numpy(),
-                targets=self.cur_targets[idx, :self.num_leap_hand_dofs].cpu().numpy(),
-                dof_pos=self.leap_hand_dof_pos[idx].cpu().numpy(),
-                reset=bool(self.reset_buf[idx]),
-                linvel_mag=float(self.object_linvel[idx].norm()),
-                angvel_mag=float(self.object_angvel[idx].norm()),
-            ))
+            idxs = self._rr_env_indices
+            rb   = self.rigid_body_states[idxs, :self.num_leap_hand_bodies].cpu().numpy()
+            opos = self.object_pos[idxs].cpu().numpy()
+            orot = self.object_rot[idxs].cpu().numpy()
+            tgt  = self.cur_targets[idxs, :self.num_leap_hand_dofs].cpu().numpy()
+            dof  = self.leap_hand_dof_pos[idxs].cpu().numpy()
+            rst  = self.reset_buf[idxs].cpu().numpy()
+            linv = self.object_linvel[idxs].norm(dim=-1).cpu().numpy()
+            angv = self.object_angvel[idxs].norm(dim=-1).cpu().numpy()
+            # One frame per observed env; the visualizer selects the active slot
+            # per window (round-robin). Cheap: len(idxs) is small (≤ #objects).
+            self._rerun_vis.tick([RerunFrame(
+                rb_states=rb[k], obj_pos=opos[k], obj_rot=orot[k],
+                targets=tgt[k], dof_pos=dof[k], reset=bool(rst[k]),
+                linvel_mag=float(linv[k]), angvel_mag=float(angv[k]),
+            ) for k in range(len(idxs))])
+
+        # Optional synergy-analysis dump (Stage 4): accumulate the 16-DoF joint
+        # trajectory + per-step yaw for offline eigengrasp PCA / limit-cycle work.
+        # One-shot: writes an .npz after dump_dof_steps steps, then stops. Lazy-init
+        # so no __init__ change; eval exits cleanly so no atexit fragility.
+        dump_path = self.env_cfg.get('dump_dof_traj', None)
+        if dump_path is not None:
+            if not hasattr(self, '_dump_dof_buf'):
+                self._dump_dof_buf, self._dump_yaw_buf = [], []
+                self._dump_dof_max = int(self.env_cfg.get('dump_dof_steps', 400))
+            if self._dump_dof_buf is not None:
+                self._dump_dof_buf.append(self.leap_hand_dof_pos.detach().cpu().numpy().copy())
+                self._dump_yaw_buf.append(self.object_angvel_finite_diff[:, 2].detach().cpu().numpy().copy())
+                if len(self._dump_dof_buf) >= self._dump_dof_max:
+                    np.savez(dump_path, dof=np.stack(self._dump_dof_buf),
+                             yaw=np.stack(self._dump_yaw_buf))
+                    print(f"[synergy] dumped {len(self._dump_dof_buf)} steps x {self.num_envs} envs -> {dump_path}")
+                    self._dump_dof_buf = None   # one-shot
 
     def _init_video_writer(self):
         """
@@ -1073,10 +1232,38 @@ class LeapHandRot(VecTaskRot):
         return values[:, self.sim_to_real_indices]
 
     def update_low_level_control(self):
-        previous_dof_pos = self.leap_hand_dof_pos.clone()
-        self._refresh_gym()      
+        # NO tensor refresh here in position-control mode: the staged reset rows
+        # must survive in the tensors until the substep-1 re-apply below (the fix
+        # for the GPU property-call poison — see reset_idx). Per-step consumers
+        # all get fresh tensors from post_physics_step's _refresh_gym.
+        if self.torque_control:
+            self._refresh_gym()  # torque PD genuinely needs per-substep state
         if os.getenv("RVIZ") is None and not self.env_cfg["disable_actions"]:
             self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.cur_targets))
+        # Re-apply the state staged by the last reset_idx. Per-actor property
+        # calls (mass loop in reset_idx, obj-mass reads in pre_physics' force
+        # block) poison the GPU pipeline: EVERY tensor-API set issued between
+        # the property call and the next gym.simulate is silently dropped.
+        # That first simulate clears the poison, so re-issuing the sets on
+        # substep 1 (after substep 0's simulate) is what makes them stick.
+        # Without this, cache restores silently no-op'd (objects stayed at
+        # creation pose) in every GPU run ever.
+        # Repro/verify: tools/probe_minimal_setter.py, probe_restore_orientation.py.
+        cd = getattr(self, "_reapply_countdown", 0)
+        if cd:
+            self._reapply_countdown = cd - 1
+            if self._reapply_countdown == 0:
+                # Substep 1, not 0: the poison clears at the FIRST simulate after
+                # the property calls; an apply issued before that is dropped.
+                # Indexed (reset envs only) so non-reset envs aren't rewound.
+                self.gym.set_dof_state_tensor_indexed(
+                    self.sim, gymtorch.unwrap_tensor(self.dof_state),
+                    gymtorch.unwrap_tensor(self._reapply_hand_indices),
+                    len(self._reapply_hand_indices))
+                self.gym.set_actor_root_state_tensor_indexed(
+                    self.sim, gymtorch.unwrap_tensor(self.root_state_tensor),
+                    gymtorch.unwrap_tensor(self._reapply_obj_indices),
+                    len(self._reapply_obj_indices))
 
     def check_termination(self, object_pos):
         resets = torch.logical_or(
@@ -1144,12 +1331,442 @@ class LeapHandRot(VecTaskRot):
         self.enable_priv_obj_com = p_cfg['enableObjCOM']
         self.enable_priv_obj_friction = p_cfg['enableObjFriction']
 
+    def _setup_z_channel(self):
+        """Oracle shape-prior `z` appended to the policy observation.
+
+        z_mode: 'none' (=proprio-only baseline B), 'z0' (coarse geometry:
+        [scale, scaled bbox extents (3), bbox fill fraction] = 5-d), 'z1' (z0 +
+        8-d analytic shape), or 'local' (16-d: per-fingertip signed distance +
+        surface normal to the object, in WORLD frame — see _compute_local_z).
+        z0/z1 are static per episode and ride the obs history like the existing
+        include_obj_scales channel (replicated identically across the 3-step
+        stack). 'local' is DYNAMIC — recomputed every step from the current
+        hand/object configuration, so the 3-step stack shows 3 different real
+        values (a finite-difference-like signal for free), not 3 copies of one.
+        Either way numObservations grows by 3*z_dim.
+        """
+        self.z_mode = self.env_cfg.get('z_mode', 'none')
+        # z0 (5-d coarse geometry) or z1 (8-d = z0 + analytic shape: inertia-eigen
+        # ratios + normalized SA/V). z1 is NESTED (z0 held fixed, shape is the delta).
+        # 'local' (16-d) is a separate, DYNAMIC axis — see docstring above and
+        # docs/research-plan-object-generalization.md Stage 2 ("local vs. global").
+        self.z_dim = {'none': 0, 'z0': 5, 'z1': 8, 'local': 16}.get(self.z_mode, 0)
+        # z_shuffle (control, docs/HANDOFF.md §4.2): permute the geometry->object
+        # map so C gets the CORRECT z0 values but attached to the WRONG objects (a
+        # consistent-but-wrong shape prior). If shuffled ~= correct, the policy is
+        # using z as an arbitrary per-object tag, not as geometry -> the id/few-
+        # samples regime. false/0 = off; any truthy int = permutation seed.
+        zs_cfg = self.env_cfg.get('z_shuffle', False)
+        self.z_shuffle_seed = int(zs_cfg) if (zs_cfg is not False and zs_cfg is not None) else None
+        if self.z_shuffle_seed == 0:
+            self.z_shuffle_seed = None
+        if self.z_dim == 0:
+            return
+        from leapsim.utils.rerun_vis import _load_object_mesh
+        import trimesh
+        asset_root = Path(__file__).parent.parent.parent
+        self._obj_geom = {}
+        self._obj_shape1 = {}  # z1 analytic shape: [inertia r2, r3, normalized SA/V]
+        # z_mode='local' shape params (computed for every object type regardless
+        # of z_mode — cheap, and lets z_mode be switched without re-deriving
+        # this): family id (0 box/1 cylinder/2 sphere) parsed from the name
+        # prefix, and UNSCALED canonical (hx,hy,hz)|(r,half_len,0)|(r,0,0) per
+        # family, derived from the mesh bbox (see _compute_local_z for the
+        # closed-form closest-point formulas that consume these).
+        self._local_family = {}
+        self._local_params = {}
+        for tid, tname in enumerate(self.object_type_list):
+            fam = _SHAPE_FAMILY_ID.get(tname.split('_')[0], 0)
+            self._local_family[tid] = fam
+            urdf = asset_root / self.asset_files_dict[tname]
+            loaded = _load_object_mesh(urdf)
+            if loaded is None:
+                self._obj_geom[tid] = (np.array([0.07, 0.07, 0.07], dtype=np.float32), 1.0)
+                self._obj_shape1[tid] = np.array([1.0, 1.0, 1.0], dtype=np.float32)  # cube-like
+                self._local_params[tid] = np.array([0.035, 0.035, 0.035], dtype=np.float32)
+                print(f"[z geom] {tname}: mesh load FAILED — using fallback box")
+                continue
+            verts, faces = loaded
+            ext = (verts.max(axis=0) - verts.min(axis=0)).astype(np.float32)
+            bbox_vol = float(ext.prod()) or 1.0
+            # cylinder/cone/capsule URDFs are authored with the axis along
+            # local Z, bbox-centered (see tools/gen_primitive_objects.py) ->
+            # ext = (2r, 2r, length|height|(L+2r)).
+            if fam == 0:      # box: half-extents directly
+                self._local_params[tid] = (ext / 2.0).astype(np.float32)
+            elif fam == 1:    # cylinder: (radius, half_length, unused)
+                r = float((ext[0] + ext[1]) / 4.0)
+                self._local_params[tid] = np.array([r, float(ext[2] / 2.0), 0.0], dtype=np.float32)
+            elif fam == 2:    # sphere: (radius, unused, unused)
+                r = float(ext.mean() / 2.0)
+                self._local_params[tid] = np.array([r, 0.0, 0.0], dtype=np.float32)
+            elif fam == 3:    # cone: (base radius, full height, unused). base
+                # at bbox z=-h/2, apex at bbox z=+h/2 (matches _make_mesh).
+                r = float((ext[0] + ext[1]) / 4.0)
+                self._local_params[tid] = np.array([r, float(ext[2]), 0.0], dtype=np.float32)
+            else:             # fam == 4, capsule: (radius, half cyl-segment length, unused).
+                # total bbox z-extent = L + 2r -> half_L = ext_z/2 - r.
+                r = float((ext[0] + ext[1]) / 4.0)
+                half_l = float(ext[2]) / 2.0 - r
+                self._local_params[tid] = np.array([r, half_l, 0.0], dtype=np.float32)
+            mesh = None
+            try:
+                mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+                vol = abs(float(mesh.volume)) or bbox_vol
+            except Exception:
+                vol = bbox_vol
+            fill = float(np.clip(vol / bbox_vol, 0.0, 1.0))
+            self._obj_geom[tid] = (ext, fill)
+            # z1 analytic descriptors (scale- & density-invariant → pure shape):
+            #   inertia-eigenvalue ratios λ2/λ1, λ3/λ1 (elongation/flatness), and
+            #   SA/V normalized by V^(2/3) then /6 (compactness; sphere~0.81, cube 1.0).
+            r2 = r3 = 1.0
+            sav = 1.0
+            if mesh is not None:
+                try:
+                    lam = np.sort(np.linalg.eigvalsh(mesh.moment_inertia))[::-1]  # λ1≥λ2≥λ3
+                    if lam[0] > 1e-12:
+                        r2, r3 = float(lam[1] / lam[0]), float(lam[2] / lam[0])
+                    area = float(mesh.area)
+                    if vol > 1e-12 and area > 0:
+                        sav = float(area / (vol ** (2.0 / 3.0)) / 6.0)
+                except Exception:
+                    pass
+            self._obj_shape1[tid] = np.array(
+                [np.clip(r2, 0, 1), np.clip(r3, 0, 1), np.clip(sav, 0, 5)], dtype=np.float32)
+            extra = f" shape1=[{r2:.3f},{r3:.3f},{sav:.3f}]" if self.z_dim == 8 else ""
+            print(f"[z geom] {tname}: bbox={ext.round(4).tolist()} fill={fill:.3f}{extra}")
+        self._num_obs_base = int(self.env_cfg["numObservations"])
+        self.cfg["env"]["numObservations"] = self._num_obs_base + 3 * self.z_dim
+        print(f"[{self.z_mode}] z_mode={self.z_mode} z_dim={self.z_dim} "
+              f"numObservations {self._num_obs_base} -> {self.cfg['env']['numObservations']}")
+
+    def _build_z_features(self):
+        """Static per-env z vector = [scale, scaled bbox extents (3), fill] (z0).
+
+        With z_shuffle set, geometry is looked up through a fixed derangement of the
+        object ids actually present in the envs, so each env receives the correct z0
+        of a DIFFERENT object (a consistent but wrong shape->object map). Scale stays
+        the env's own value (it is not shuffled — the control targets the shape map).
+
+        z_mode='local' takes a DIFFERENT path (_build_local_z_params below): there
+        is no static z0_features vector for 'local' — only the per-env shape
+        family/params needed to compute the per-STEP feature in _compute_local_z.
+        """
+        if self.z_mode == 'local':
+            self._build_local_z_params()
+            return
+        ids = self.env_object_type_id.cpu().numpy()
+        geom_id = ids  # by default env i uses its own object's geometry
+        if self.z_shuffle_seed is not None:
+            present = np.unique(ids)
+            rng = np.random.RandomState(self.z_shuffle_seed)
+            perm = present.copy()
+            rng.shuffle(perm)
+            # break any fixed points so the map is guaranteed wrong (needs >=2 ids)
+            if len(present) >= 2:
+                for k in range(len(present)):
+                    if perm[k] == present[k]:
+                        j = (k + 1) % len(present)
+                        perm[k], perm[j] = perm[j], perm[k]
+            id2perm = {int(o): int(p) for o, p in zip(present, perm)}
+            geom_id = np.array([id2perm[int(o)] for o in ids])
+            names = self.object_type_list
+            print(f"[z0 shuffle seed={self.z_shuffle_seed}] geometry->object map "
+                  f"(shape of A given to B): " +
+                  ", ".join(f"{names[int(o)]}<-{names[int(p)]}" for o, p in id2perm.items()))
+
+        ext = torch.zeros((self.num_envs, 3), device=self.device)
+        fill = torch.zeros((self.num_envs, 1), device=self.device)
+        for i in range(self.num_envs):
+            e, f = self._obj_geom[int(geom_id[i])]
+            ext[i] = torch.tensor(e, device=self.device)
+            fill[i, 0] = f
+        scl = self.obj_scales.to(self.device).float().unsqueeze(1)
+        parts = [scl, ext * scl, fill]                      # z0 (5-d)
+        if self.z_dim == 8:                                 # z1: append analytic shape (3-d)
+            sh = torch.zeros((self.num_envs, 3), device=self.device)
+            for i in range(self.num_envs):
+                sh[i] = torch.tensor(self._obj_shape1[int(geom_id[i])], device=self.device)
+            parts.append(sh)
+        self.z0_features = torch.cat(parts, dim=1).float()
+        assert self.z0_features.shape[1] == self.z_dim, \
+            f"z features dim {self.z0_features.shape[1]} != z_dim {self.z_dim}"
+        print(f"[{self.z_mode}] built z for {self.num_envs} envs, dim {self.z_dim}"
+              f"{' (SHUFFLED)' if self.z_shuffle_seed is not None else ''}; "
+              f"env0 z={self.z0_features[0].cpu().numpy().round(4).tolist()}")
+
+    def _build_local_z_params(self):
+        """Static per-env shape family + canonical (unscaled) params for
+        z_mode='local'. z_shuffle applies here too (same geometry->object
+        derangement as z0/z1), for the same reason: a future shuffled-local
+        control needs it wired up identically to the static rungs.
+        """
+        ids = self.env_object_type_id.cpu().numpy()
+        geom_id = ids
+        if self.z_shuffle_seed is not None:
+            present = np.unique(ids)
+            rng = np.random.RandomState(self.z_shuffle_seed)
+            perm = present.copy()
+            rng.shuffle(perm)
+            if len(present) >= 2:
+                for k in range(len(present)):
+                    if perm[k] == present[k]:
+                        j = (k + 1) % len(present)
+                        perm[k], perm[j] = perm[j], perm[k]
+            id2perm = {int(o): int(p) for o, p in zip(present, perm)}
+            geom_id = np.array([id2perm[int(o)] for o in ids])
+
+        family = np.array([self._local_family[int(g)] for g in geom_id], dtype=np.int64)
+        params = np.stack([self._local_params[int(g)] for g in geom_id], axis=0)
+        self._env_shape_family = torch.tensor(family, device=self.device, dtype=torch.long)
+        self._env_shape_params = torch.tensor(params, device=self.device, dtype=torch.float32)
+        # INTERPRETABILITY (default off): counterfactually tell the policy the object
+        # is a DIFFERENT shape than it really is — the local analogue of "drive object
+        # A with object B's z". local_cf_family in {0=box,1=cyl,2=sphere}; optional
+        # local_cf_params=[a,b,c] overrides the canonical half-extents/(r,half_len)/r.
+        # The physical object is unchanged; only the feature's geometry is swapped.
+        cf_fam = self.env_cfg.get('local_cf_family', None)
+        if cf_fam is not None:
+            self._env_shape_family[:] = int(cf_fam)
+            cf_par = self.env_cfg.get('local_cf_params', None)
+            if cf_par is not None:
+                self._env_shape_params[:] = torch.tensor(
+                    [float(x) for x in cf_par], device=self.device, dtype=torch.float32)
+            print(f"[local CF] COUNTERFACTUAL: every env told family={int(cf_fam)} "
+                  f"params={self._env_shape_params[0].cpu().numpy().round(4).tolist()}")
+        print(f"[local] built shape family/params for {self.num_envs} envs"
+              f"{' (SHUFFLED)' if self.z_shuffle_seed is not None else ''}; "
+              f"env0 family={int(self._env_shape_family[0])} params="
+              f"{self._env_shape_params[0].cpu().numpy().round(4).tolist()}")
+
+    @staticmethod
+    def _closest_point_and_normal_local(p, family, params):
+        """Closed-form signed distance + outward unit normal from query points
+        `p` to the surface of a box/cylinder/sphere/cone/capsule, all in the
+        OBJECT-LOCAL, UNSCALED (canonical) frame. Fully vectorized (no python
+        loop) so this is cheap enough to call every step for all envs.
+
+        p:      [N,4,3] query points (per env, per fingertip) in local frame.
+        family: [N] long, 0=box 1=cylinder 2=sphere 3=cone 4=capsule.
+        params: [N,3] float, meaning depends on family:
+                  box      -> (hx, hy, hz)            half-extents
+                  cylinder -> (r, half_len, unused)    axis = local Z
+                  sphere   -> (r, unused, unused)
+                  cone     -> (base radius R, full height h, unused)
+                              base at local z=-h/2, apex at z=+h/2, axis Z
+                  capsule  -> (r, half cyl-segment length, unused)  axis Z
+
+        Returns (dist [N,4], normal [N,4,3]) — dist is SIGNED (negative =
+        penetrating). The "inside" branches (fingertip past the surface) use an
+        approximate nearest-face/axis fallback since exact interior projection
+        isn't needed for a contact-proximity feature — what matters is behaving
+        sanely near and outside the surface, which is where fingertips live
+        during normal grasping/rotation.
+        """
+        eps = 1e-8
+        device = p.device
+        params_b = params[:, None, :].expand(-1, 4, -1)   # [N,4,3]
+        family_b = family[:, None].expand(-1, 4)           # [N,4]
+
+        # ---- box ----
+        half = params_b.clamp_min(eps)
+        cp_box = torch.clamp(p, -half, half)
+        diff_box = p - cp_box
+        dist_box = diff_box.norm(dim=-1)
+        outside_box = dist_box > eps
+        ratio = p.abs() / half
+        axis = ratio.argmax(dim=-1)                                    # [N,4]
+        inside_normal_box = torch.nn.functional.one_hot(axis, 3).to(p.dtype) * torch.sign(p)
+        normal_box = torch.where(
+            outside_box.unsqueeze(-1),
+            diff_box / dist_box.clamp_min(eps).unsqueeze(-1),
+            inside_normal_box,
+        )
+        pen_box = (half - p.abs()).amin(dim=-1)                        # >0 if inside
+        signed_dist_box = torch.where(outside_box, dist_box, -pen_box)
+
+        # ---- sphere ----
+        r_sph = params_b[..., 0].clamp_min(eps)
+        pn = p.norm(dim=-1)
+        default_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=p.dtype)
+        normal_sphere = torch.where(
+            (pn > eps).unsqueeze(-1), p / pn.clamp_min(eps).unsqueeze(-1), default_up.expand_as(p),
+        )
+        signed_dist_sphere = pn - r_sph
+
+        # ---- cylinder (axis = local Z) ----
+        r_cyl = params_b[..., 0].clamp_min(eps)
+        hl_cyl = params_b[..., 1].clamp_min(eps)
+        xy = p[..., :2]
+        r_xy = xy.norm(dim=-1)
+        default_radial = torch.tensor([1.0, 0.0], device=device, dtype=p.dtype)
+        radial_dir = torch.where(
+            (r_xy > eps).unsqueeze(-1), xy / r_xy.clamp_min(eps).unsqueeze(-1), default_radial.expand_as(xy),
+        )
+        z = p[..., 2]
+        outside_cap = z.abs() > hl_cyl
+        outside_side = r_xy > r_cyl
+        cp_z = torch.where(outside_cap, torch.sign(z) * hl_cyl, z)
+        cp_xy = torch.where(outside_side.unsqueeze(-1), radial_dir * r_cyl.unsqueeze(-1), xy)
+        cp_cyl = torch.cat([cp_xy, cp_z.unsqueeze(-1)], dim=-1)
+        diff_cyl = p - cp_cyl
+        dist_cyl = diff_cyl.norm(dim=-1)
+        inside_cyl = (~outside_cap) & (~outside_side)
+        radial_pen = r_cyl - r_xy                                       # >0 if inside radially
+        cap_pen = hl_cyl - z.abs()                                      # >0 if inside axially
+        use_radial = radial_pen < cap_pen
+        zero2 = torch.zeros_like(xy)
+        inside_normal_cyl = torch.where(
+            use_radial.unsqueeze(-1),
+            torch.cat([radial_dir, zero2[..., :1]], dim=-1),
+            torch.cat([zero2, torch.sign(z).unsqueeze(-1)], dim=-1),
+        )
+        normal_cyl = torch.where(
+            (dist_cyl > eps).unsqueeze(-1),
+            diff_cyl / dist_cyl.clamp_min(eps).unsqueeze(-1),
+            inside_normal_cyl,
+        )
+        signed_dist_cyl = torch.where(inside_cyl, -torch.minimum(radial_pen, cap_pen), dist_cyl)
+
+        # ---- capsule (axis = local Z; central segment + radius r) ----
+        # Simplest of all five: SDF(p) = |p - clamp_to_segment(p)| - r. The sign
+        # falls out for free (negative once inside the tube), no separate
+        # inside/outside branch needed.
+        r_cap = params_b[..., 0].clamp_min(eps)
+        hl_cap = params_b[..., 1].clamp_min(eps)             # half cyl-segment length
+        z_cap = p[..., 2]
+        z_clamped = torch.clamp(z_cap, -hl_cap, hl_cap)
+        seg_pt = torch.cat([torch.zeros_like(p[..., :2]), z_clamped.unsqueeze(-1)], dim=-1)
+        diff_cap = p - seg_pt
+        dist_axis_cap = diff_cap.norm(dim=-1)
+        default_up = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=p.dtype)
+        normal_cap = torch.where(
+            (dist_axis_cap > eps).unsqueeze(-1),
+            diff_cap / dist_axis_cap.clamp_min(eps).unsqueeze(-1),
+            default_up.expand_as(p),
+        )
+        signed_dist_cap = dist_axis_cap - r_cap
+
+        # ---- cone (axis = local Z; base radius R at z=-h/2, apex at z=+h/2) ----
+        # Rotationally symmetric -> work in the 2D (r,z) cross-section: closest
+        # point is on either the slant segment (apex -> base rim) or the base
+        # disk's edge-on segment (z=-h/2, r in [0,R]); take whichever is nearer,
+        # then lift back to 3D using the query's own azimuthal direction.
+        R_cone = params_b[..., 0].clamp_min(eps)
+        h_cone = params_b[..., 1].clamp_min(eps)
+        half_h = h_cone / 2.0
+        xy_c = p[..., :2]
+        r_c = xy_c.norm(dim=-1)
+        default_radial = torch.tensor([1.0, 0.0], device=device, dtype=p.dtype)
+        radial_dir_c = torch.where(
+            (r_c > eps).unsqueeze(-1), xy_c / r_c.clamp_min(eps).unsqueeze(-1), default_radial.expand_as(xy_c),
+        )
+        z_c = p[..., 2]
+
+        apex_r = torch.zeros_like(R_cone)
+        seg_dr, seg_dz = R_cone - apex_r, (-half_h) - half_h        # base_r - apex_r, base_z - apex_z
+        seg_len_sq = (seg_dr * seg_dr + seg_dz * seg_dz).clamp_min(eps)
+        t = ((r_c - apex_r) * seg_dr + (z_c - half_h) * seg_dz) / seg_len_sq
+        t = t.clamp(0.0, 1.0)
+        slant_r = apex_r + t * seg_dr
+        slant_z = half_h + t * seg_dz
+        dist_slant = torch.sqrt((r_c - slant_r) ** 2 + (z_c - slant_z) ** 2 + eps)
+
+        base_cp_r = torch.clamp(r_c, torch.zeros_like(R_cone), R_cone)
+        base_cp_z = -half_h
+        dist_base = torch.sqrt((r_c - base_cp_r) ** 2 + (z_c - base_cp_z) ** 2 + eps)
+
+        use_slant = dist_slant <= dist_base
+        closest_r = torch.where(use_slant, slant_r, base_cp_r)
+        closest_z = torch.where(use_slant, slant_z, base_cp_z)
+        unsigned_dist_cone = torch.where(use_slant, dist_slant, dist_base)
+
+        R_at_z = R_cone * (half_h - z_c) / h_cone                    # cone radius at height z_c
+        inside_cone = (z_c >= -half_h) & (z_c <= half_h) & (r_c <= R_at_z)
+
+        closest_3d_cone = torch.cat([radial_dir_c * closest_r.unsqueeze(-1), closest_z.unsqueeze(-1)], dim=-1)
+        diff_cone = p - closest_3d_cone
+        diff_norm_cone = diff_cone.norm(dim=-1)
+        outward_cone = diff_cone / diff_norm_cone.clamp_min(eps).unsqueeze(-1)
+        # Inside: diff points p<-closest (into the solid); flip it so the
+        # fallback still reads as an "outward-ish" escape direction, same
+        # convention as every other shape's inside branch above.
+        normal_cone = torch.where(inside_cone.unsqueeze(-1), -outward_cone, outward_cone)
+        signed_dist_cone = torch.where(inside_cone, -unsigned_dist_cone, unsigned_dist_cone)
+
+        # ---- select per env family ----
+        is_box = (family_b == 0).unsqueeze(-1)
+        is_cyl = (family_b == 1).unsqueeze(-1)
+        is_cone = (family_b == 3).unsqueeze(-1)
+        is_cap = (family_b == 4).unsqueeze(-1)
+        normal = torch.where(
+            is_box, normal_box, torch.where(
+                is_cyl, normal_cyl, torch.where(
+                    is_cone, normal_cone, torch.where(
+                        is_cap, normal_cap, normal_sphere))))
+        dist = torch.where(
+            family_b == 0, signed_dist_box, torch.where(
+                family_b == 1, signed_dist_cyl, torch.where(
+                    family_b == 3, signed_dist_cone, torch.where(
+                        family_b == 4, signed_dist_cap, signed_dist_sphere))))
+        return dist, normal
+
+    def _compute_local_z(self):
+        """Per-step DYNAMIC local feature: for each of the 4 fingertips, signed
+        distance + outward surface normal to the object, in WORLD units/frame.
+        16-d = 4 fingertips * (1 distance + 3 normal). See
+        docs/research-plan-object-generalization.md Stage 2 ("local vs global")
+        for why this exists — the DexRepNet++-style counterpart to z0/z1's
+        static, global whole-object descriptors.
+        """
+        finger_pos = self.rigid_body_states[:, FINGERTIP_LOCAL_IDS, :3]           # [N,4,3] world
+        obj_p = self.object_pos.unsqueeze(1).expand(-1, 4, -1)                     # [N,4,3]
+        obj_q = self.object_rot.unsqueeze(1).expand(-1, 4, -1)                     # [N,4,4] xyzw
+        local_p = quat_rotate_inverse(obj_q.reshape(-1, 4), (finger_pos - obj_p).reshape(-1, 3))
+        obj_scales = self.obj_scales.to(self.device).float()                       # [N]
+        scales = obj_scales.view(-1, 1, 1).expand(-1, 4, 1).reshape(-1, 1)
+        local_p_unscaled = (local_p / scales.clamp_min(1e-6)).reshape(self.num_envs, 4, 3)
+
+        dist_unscaled, normal_local = self._closest_point_and_normal_local(
+            local_p_unscaled, self._env_shape_family, self._env_shape_params)
+
+        scale_env = obj_scales.view(-1, 1)                                         # [N,1]
+        dist_world = dist_unscaled * scale_env                                     # [N,4]
+        normal_world = quat_apply(
+            self.object_rot.unsqueeze(1).expand(-1, 4, -1).reshape(-1, 4),
+            normal_local.reshape(-1, 3),
+        ).reshape(self.num_envs, 4, 3)
+
+        feat = torch.cat([dist_world.unsqueeze(-1), normal_world], dim=-1).reshape(self.num_envs, 16)
+        # INTERPRETABILITY ablation (default off): 'zero' kills the feature (does the
+        # policy rely on it?); 'noise' adds gaussian noise of the given std.
+        abl = self.env_cfg.get('local_ablate', None)
+        if abl == 'zero':
+            feat = torch.zeros_like(feat)
+        elif abl == 'noise':
+            feat = feat + torch.randn_like(feat) * float(self.env_cfg.get('local_ablate_std', 0.02))
+        return feat
+
+    def _current_z(self):
+        """Dispatch: static z0/z1 read the precomputed per-env tensor; 'local'
+        recomputes fresh every call (every step) from the current configuration.
+        """
+        if self.z_mode == 'local':
+            return self._compute_local_z()
+        return self.z0_features
+
     def _setup_object_info(self, o_cfg):
         self.object_type = o_cfg['type']
         raw_prob = o_cfg['sampleProb']
-        assert (sum(raw_prob) == 1)
-
         primitive_list = self.object_type.split('+')
+        # one sampleProb entry per '+'-joined family; default to a uniform split so
+        # multi-family mixes (Stage-1 B/C) don't need it spelled out every run.
+        if len(raw_prob) != len(primitive_list):
+            raw_prob = [1.0 / len(primitive_list)] * len(primitive_list)
+        assert abs(sum(raw_prob) - 1.0) < 1e-6, \
+            f"sampleProb must sum to 1, got {raw_prob} (sum {sum(raw_prob)})"
+
         print('---- Primitive List ----')
         print(primitive_list)
         self.object_type_prob = []
@@ -1159,31 +1776,21 @@ class LeapHandRot(VecTaskRot):
             'cube':               'assets/cube.urdf',
             'hammer':             'assets/hammer.urdf',
         }
+        # Procedural primitive families (tools/gen_primitive_objects.py) — one
+        # <assets>/<category>/<subset>/*.urdf glob per category sharing this
+        # exact pattern. Generalized from 3 near-identical copy-pasted
+        # branches (cuboid/cylinder/sphere) so a new category (cone, capsule,
+        # ...) only needs adding here, not a 4th near-duplicate block.
         for p_id, prim in enumerate(primitive_list):
-            if 'cuboid' in prim:
+            category = next((c for c in _PRIMITIVE_FAMILY_CATEGORIES if c in prim), None)
+            if category is not None:
                 subset_name = self.object_type.split('_')[-1]
-                cuboids = sorted(glob(f'../assets/cuboid/{subset_name}/*.urdf'))
-                cuboid_list = [f'cuboid_{i}' for i in range(len(cuboids))]
-                self.object_type_list += cuboid_list
-                for i, name in enumerate(cuboids):
-                    self.asset_files_dict[f'cuboid_{i}'] = name.replace('../assets/', 'assets/')
-                self.object_type_prob += [raw_prob[p_id] / len(cuboid_list) for _ in cuboid_list]
-            elif 'cylinder' in prim:
-                subset_name = self.object_type.split('_')[-1]
-                cylinders = sorted(glob(f'../assets/cylinder/{subset_name}/*.urdf'))
-                cylinder_list = [f'cylinder_{i}' for i in range(len(cylinders))]
-                self.object_type_list += cylinder_list
-                for i, name in enumerate(cylinders):
-                    self.asset_files_dict[f'cylinder_{i}'] = name.replace('../assets/', 'assets/')
-                self.object_type_prob += [raw_prob[p_id] / len(cylinder_list) for _ in cylinder_list]
-            elif 'sphere' in prim:
-                subset_name = self.object_type.split('_')[-1]
-                spheres = sorted(glob(f'../assets/sphere/{subset_name}/*.urdf'))
-                sphere_list = [f'sphere_{i}' for i in range(len(spheres))]
-                self.object_type_list += sphere_list
-                for i, name in enumerate(spheres):
-                    self.asset_files_dict[f'sphere_{i}'] = name.replace('../assets/', 'assets/')
-                self.object_type_prob += [raw_prob[p_id] / len(sphere_list) for _ in sphere_list]
+                paths = sorted(glob(f'../assets/{category}/{subset_name}/*.urdf'))
+                names = [f'{category}_{i}' for i in range(len(paths))]
+                self.object_type_list += names
+                for i, path in enumerate(paths):
+                    self.asset_files_dict[f'{category}_{i}'] = path.replace('../assets/', 'assets/')
+                self.object_type_prob += [raw_prob[p_id] / max(len(names), 1) for _ in names]
             else:
                 self.object_type_list += [prim]
                 self.object_type_prob += [raw_prob[p_id]]

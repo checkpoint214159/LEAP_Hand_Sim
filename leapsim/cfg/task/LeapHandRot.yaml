@@ -24,11 +24,15 @@ env:
     fidelity: mesh                # mesh = full STL geometry; minimal = boxes only
     window_length_steps: 400      # control steps per recording window (400 = 20s @ 20Hz)
     record_every_n_steps: 4000    # open a new window every N steps (~200s sim time)
-    env_idx: 0
+    env_idx: 0                    # single-env fallback (used when sample_per_object=false)
+    sample_per_object: true       # rotate observed env across windows, one per distinct object → healthy sample
+    # env_indices: [0, 1, 2, 3]   # explicit override: stream exactly these envs (round-robin)
     output_dir: "."               # placeholder; train.py overwrites with experiment_dir/rerun
   # environment basic
   numEnvs: ${resolve_default:16384,${...num_envs}}
   numObservations: 102
+  z_mode: none                  # oracle shape prior: none (proprio B) | z0 (5-d: scale+bbox+fill) | z1 (8-d: z0 + inertia-eigen ratios + norm SA/V) | local (16-d: per-fingertip signed dist + surface normal, DYNAMIC per-step, see docs/research-plan-object-generalization.md Stage 2 "local vs global")
+  z_shuffle: false              # control (§4.2): false/0=off | int seed = permute geometry->object map (correct z0 values, wrong objects)
   numActions: 16
   envSpacing: 0.25
   phase_period: 2

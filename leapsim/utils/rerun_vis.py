@@ -71,7 +71,7 @@ class RerunVisualizer:
         urdf_path: Path,
         link_names: List[str],
         object_shape: ObjectShape = ('box', (0.04, 0.04, 0.04)),
-        object_urdf_path: Optional[Path] = None,
+        observed: Optional[List[dict]] = None,
     ) -> None:
         self._enabled = bool(rr_cfg.get('enabled', False))
         if not self._enabled:
@@ -87,11 +87,26 @@ class RerunVisualizer:
         self._object_shape = object_shape
         self._meshes       = self._load_meshes(urdf_path) if self._fidelity == 'mesh' else {}
 
-        # Try to build object mesh from its URDF; fall back to ObjectShape primitive.
-        self._object_mesh: Optional[Tuple[np.ndarray, np.ndarray]] = None
-        if object_urdf_path is not None:
-            self._object_mesh = _load_object_mesh(object_urdf_path)
+        # Observed envs, one streamed per window (round-robin over the sample).
+        # Each carries its own object instance; we preload each object's mesh
+        # scaled by that env's actor scale (set_actor_scale is a uniform scale the
+        # sim applies that the raw URDF mesh doesn't include). Rendering the wrong
+        # object's mesh makes fingers appear to grip mid-air around a floating
+        # wrong-shaped object. Falls back to the ObjectShape primitive per slot.
+        self._observed = observed or [dict(env_idx=0, object_id=0,
+                                           object_type='object', object_urdf=None,
+                                           object_scale=1.0)]
+        self._obj_meshes: List[Optional[Tuple[np.ndarray, np.ndarray]]] = []
+        for s in self._observed:
+            mesh = None
+            if s.get('object_urdf') is not None:
+                mesh = _load_object_mesh(s['object_urdf'])
+                if mesh is not None and float(s['object_scale']) != 1.0:
+                    verts, faces = mesh
+                    mesh = (verts * float(s['object_scale']), faces)
+            self._obj_meshes.append(mesh)
 
+        self._active_slot  = 0
         self._global_step  = 0
         self._window_step  = 0
         self._window_count = 0
@@ -101,18 +116,24 @@ class RerunVisualizer:
     # Public API
     # ------------------------------------------------------------------
 
-    def tick(self, frame: RerunFrame) -> None:
+    def tick(self, frames) -> None:
         if not self._enabled:
             return
+        if isinstance(frames, RerunFrame):          # back-compat: accept a single frame
+            frames = [frames]
 
         self._global_step += 1
 
         if not self._in_window and self._global_step % self._period == 0:
+            # Choose which observed env this window streams (round-robin over the
+            # sample) BEFORE opening, so the matching object mesh + label render.
+            self._active_slot = self._window_count % len(self._observed)
             self._open_window()
             self._in_window   = True
             self._window_step = 0
 
         if self._in_window:
+            frame = frames[self._active_slot]
             if frame.reset:
                 rr.log("events", rr.TextLog(f"reset — global step {self._global_step}"))
             self._log_frame(frame)
@@ -126,12 +147,25 @@ class RerunVisualizer:
     # ------------------------------------------------------------------
 
     def _open_window(self) -> None:
+        s = self._observed[self._active_slot]
         path = (
             self._output_dir
-            / f"window_{self._window_count:04d}_step_{self._global_step:08d}.rrd"
+            / (f"window_{self._window_count:04d}_step_{self._global_step:08d}"
+               f"_env{int(s['env_idx']):04d}_{s['object_type']}.rrd")
         )
         rr.init("leap_hand", recording_id=path.stem, spawn=False)
         rr.save(str(path))
+
+        # Text banner naming the env / object instance this window streams, so the
+        # viewer makes clear which of the sampled envs you're looking at.
+        rr.log(
+            "label",
+            rr.TextDocument(
+                f"env {int(s['env_idx'])}  |  object: {s['object_type']} "
+                f"(id {int(s['object_id'])})  |  scale {float(s['object_scale']):.3f}"
+            ),
+            static=True,
+        )
 
         for name in self._link_names:
             color = _link_color(name)
@@ -153,8 +187,9 @@ class RerunVisualizer:
                     static=True,
                 )
 
-        if self._object_mesh is not None:
-            verts, faces = self._object_mesh
+        object_mesh = self._obj_meshes[self._active_slot]
+        if object_mesh is not None:
+            verts, faces = object_mesh
             rr.log(
                 "world/object",
                 rr.Mesh3D(

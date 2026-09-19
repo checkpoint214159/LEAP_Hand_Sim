@@ -1,16 +1,28 @@
 contact:
-  mean_fingers_at_ep_end: 0.345
+  mean_fingers_at_ep_end: 1.024
 contact_criterion:
-  contact_grace_steps: 0
-  finger_dist_threshold_m: 0.0929
+  contact_grace_steps: 15
+  finger_dist_threshold_m: 0.0913
   max_contact_force_N: 50.0
+  max_palm_contact_force_N: 0.1
   min_contact_force_N: 1.0
   num_contact_fingers: 3
+  palm_contact_bodies:
+  - 0
+  - 1
+  - 2
+  - 5
+  - 6
+  - 9
+  - 10
+  - 13
+  - 14
 distance:
-  mean_min_fingertip_dist_m: 2.0787
+  mean_min_fingertip_dist_m: 0.0761
 force:
-  mean_ep_max_valid_N: 6.941
-  mean_spike_rate_pct: 1.94
-success_rate_pct: 0.01
-successful_grasps: 487
-total_episodes: 5002355
+  mean_ep_max_palm_N: 3.811
+  mean_ep_max_valid_N: 6.107
+  mean_spike_rate_pct: 0.12
+success_rate_pct: 0.78
+successful_grasps: 1024
+total_episodes: 132118

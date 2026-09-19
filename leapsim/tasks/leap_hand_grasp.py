@@ -254,9 +254,14 @@ class LeapHandGrasp(LeapHandRot):
         self._last_surface_dist[env_ids] = self._compute_fingertip_surface_distance(env_ids)
 
         success = self.progress_buf[env_ids] == self.max_episode_length
+        # Targets = last_attempted_pose, NOT cur_targets: with disable_actions the
+        # sim holds the attempt pose pushed at reset for the whole episode, but
+        # pre_physics_step still integrates the player's random actions into the
+        # cur_targets TENSOR (a drifting random walk the sim never sees). Saving
+        # cur_targets stores garbage targets that rip the grip open on restore.
         all_states = torch.cat([
             self.leap_hand_dof_pos,
-            self.cur_targets[:, :self.num_leap_hand_dofs],
+            self.last_attempted_pose,
             self.root_state_tensor[self.object_indices, :7],
             self.env_object_type_id.float().unsqueeze(1),
         ], dim=1)
@@ -321,9 +326,18 @@ class LeapHandGrasp(LeapHandRot):
             f'best_fit={best_score:.2f}'
         )
 
+        # ── Periodic flush ─────────────────────────────────────────────────────
+        # atexit only fires on CLEAN exit; under `uv run` SIGINT/SIGQUIT are set to
+        # SIG_IGN in the child and SIGTERM/SIGKILL skip atexit, so a stopped gen
+        # loses its whole in-memory cache. Flush every 50 grasps so partial progress
+        # always survives any stop method.
+        _bucket = self.saved_grasping_states.shape[0] // 50
+        if _bucket > getattr(self, '_last_flush_bucket', 0):
+            self._last_flush_bucket = _bucket
+            self._save_cache_partial()
+
         # ── Exit when target reached ───────────────────────────────────────────
-        # No per-reset save: the atexit hook in __init__ flushes whatever's
-        # accumulated on any process termination (clean exit, Ctrl+C, etc.).
+        # atexit hook in __init__ also flushes on clean exit / Ctrl+C.
         if len(self.saved_grasping_states) >= self.cfg["env"]["grasp_cache_len"]:
             print(f'[cache] reached target {self.cfg["env"]["grasp_cache_len"]} grasps — exiting.')
             exit()
@@ -341,9 +355,12 @@ class LeapHandGrasp(LeapHandRot):
         self.root_state_tensor[self.object_indices[env_ids], 7:13] = torch.zeros_like(
             self.root_state_tensor[self.object_indices[env_ids], 7:13])
 
-        object_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
-        self.gym.set_actor_root_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor),
-                                                     gymtorch.unwrap_tensor(object_indices), len(object_indices))
+        # FULL-tensor apply, not *_indexed: get/set_actor_rigid_body_properties in
+        # the same step (mass randomization above) silently breaks the INDEXED
+        # root-state apply on the GPU pipeline (see leap_hand_rot.reset_idx and
+        # tools/probe_minimal_setter.py gpu massset). Gen currently runs the CPU
+        # pipeline where indexed works, but keep the immune form everywhere.
+        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_state_tensor))
 
         # Sample next attempt around each env's *best* pose (not canonical_pose).
         # On the very first reset, best_pose_per_env is initialized to canonical,
@@ -360,12 +377,17 @@ class LeapHandGrasp(LeapHandRot):
         self.prev_targets[env_ids, :self.num_leap_hand_dofs] = pos
         self.cur_targets[env_ids, :self.num_leap_hand_dofs] = pos
 
-        hand_indices = self.hand_indices[env_ids].to(torch.int32)
+        # Full-tensor applies (see root-state comment above): immune to the
+        # property-setter interference; tensors hold current state for non-reset
+        # envs and the new attempt pose for reset ones.
         if not self.torque_control:
-            self.gym.set_dof_position_target_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.prev_targets),
-                                                            gymtorch.unwrap_tensor(hand_indices), len(env_ids))
-        self.gym.set_dof_state_tensor_indexed(self.sim, gymtorch.unwrap_tensor(self.dof_state),
-                                              gymtorch.unwrap_tensor(hand_indices), len(env_ids))
+            self.gym.set_dof_position_target_tensor(self.sim, gymtorch.unwrap_tensor(self.prev_targets))
+        self.gym.set_dof_state_tensor(self.sim, gymtorch.unwrap_tensor(self.dof_state))
+        # GPU-pipeline poison guard: re-apply at substep 1 of the next step
+        # (see leap_hand_rot.reset_idx / update_low_level_control).
+        self._reapply_countdown = 2
+        self._reapply_obj_indices = torch.unique(self.object_indices[env_ids]).to(torch.int32)
+        self._reapply_hand_indices = self.hand_indices[env_ids].to(torch.int32)
 
         self.progress_buf[env_ids] = 0
         self.obs_buf[env_ids] = 0

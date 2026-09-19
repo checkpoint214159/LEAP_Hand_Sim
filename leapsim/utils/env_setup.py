@@ -53,6 +53,13 @@ def create_leap_assets(gym, sim, asset_root: Path, env_cfg, body_shape_indices, 
         obj_opts = gymapi.AssetOptions()
         if env_cfg["disable_gravity"]:
             obj_opts.disable_gravity = True
+        # Needed for mesh-geometry objects (cone/capsule families, tools/
+        # gen_primitive_objects.py) — box/cylinder/sphere use native URDF
+        # primitive tags and are unaffected (PhysX collides those
+        # analytically regardless of this flag). Harmless/cheap even for
+        # already-convex meshes (VHACD just finds 1 hull, same as the hand's
+        # simplest links).
+        obj_opts.vhacd_enabled = True
         obj_path = asset_root / asset_files_dict[object_type]
         obj_asset = gym.load_asset(sim, str(obj_path.parent), obj_path.name, obj_opts)
         object_asset_list.append(obj_asset)

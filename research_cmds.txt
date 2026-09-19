@@ -1,0 +1,120 @@
+M0: Generated grasps
+
+v2 caches (strict criterion), run 2026-07-11 18:08 -> 2026-07-12 ~14:50, 30 jobs x ~35-55 min.
+All commands from src/LEAP_Hand_Sim/leapsim/.
+
+# prep: move v1 (loose-criterion) caches aside — runner resumes by cache-file existence
+mkdir -p cache/loose_v1 && mv cache/leap_hand_in_{cuboid,cylinder,sphere}_* cache/raw cache/_grasp_gen_status.json cache/loose_v1/
+
+# the run (all settings = tools/gen_grasp_caches.py defaults)
+nohup uv run python tools/gen_grasp_caches.py > tools/logs/runner.out 2>&1 &
+
+# effective settings (echoed per cache in cache/*_stats.yaml -> contact_criterion; the echo is
+# ground truth — a mistyped Hydra override fails silently):
+#   6 families x 5 scales [0.95 0.9 1.0 1.05 1.1], 1024 envs, episodeLength 150,
+#   target 1024 grasps/cache, timeout 3600 s/job
+#   criterion: num_contact_fingers=3, min_contact_force=1.0 N, contact_grace_steps=0,
+#     finger_dist_threshold = family max center-to-surface x scale + 0.035 (0.071-0.102 m),
+#     grasp_dof_search_radius=0.15
+#   init pose per family x scale via override_object_init_{x,y,z,rot} (GLOBAL coords):
+#     z = 0.5325 (palm support plane) + half_height x scale + 0.005; x=-0.03 y=0.04;
+#     cylinders lying across palm rot=[1.5708,0,0]
+#   rerun ON: one 150-step window every 1500 steps, env 0
+
+# each job expands to a train.py subprocess (full lines for all 30 jobs in
+# tools/logs/grasp_gen_20260711_180846.log); example, cuboid_heldout s0.95:
+uv run python train.py task=LeapHandGrasp test=true pipeline=cpu \
+  wandb_activate=false log_to_sheet=false \
+  experiment=graspgen_cuboid_heldout_s095 \
+  task.env.object.type=cuboid_heldout \
+  task.env.grasp_cache_name=leap_hand_in_cuboid_heldout \
+  task.env.baseObjScale=0.95 task.env.numEnvs=1024 task.env.episodeLength=150 \
+  task.env.num_contact_fingers=3 +task.env.min_contact_force=1.0 \
+  +task.env.finger_dist_threshold=0.0929 +task.env.contact_grace_steps=0 \
+  task.env.grasp_dof_search_radius=0.15 \
+  task.env.override_object_init_x=-0.03 task.env.override_object_init_y=0.04 \
+  task.env.override_object_init_z=0.5755 task.env.override_object_init_rot=[0.0,0.0,0.0] \
+  train.params.config.player.games_num=5000000 \
+  task.env.rerun.enabled=true task.env.rerun.window_length_steps=150 \
+  task.env.rerun.record_every_n_steps=1500
+
+# outputs:
+#   cache/leap_hand_in_<family>_grasp_50k_s<scale>.npy   30 caches (rows = 16 hand DoF + 7 obj pose)
+#   cache/leap_hand_in_<family>_..._stats.yaml           criterion echo + success/spike stats
+#   cache/_grasp_gen_status.json                         per-job ok/duration
+#   runs/graspgen_<family>_s<scale>_<ts>/rerun/*.rrd     visual windows (Rerun viewer)
+#   tools/logs/runner.out, tools/logs/grasp_gen_20260711_180846.log
+
+
+
+Verify grasps:
+
+uv run python train.py task=LeapHandRot test=true headless=true \
+  wandb_activate=false log_to_sheet=false \
+  experiment=graspcheck_cuboid_train_s10 \
+  task.env.object.type=cuboid_train \
+  task.env.grasp_cache_name=leap_hand_in_cuboid_train \
+  'task.env.randomization.randomizeScaleList=[1.0]' \
+  task.env.numEnvs=64 \
+  task.env.forceScale=0 \
+  task.env.randomization.randomizeMassLower=0.05 task.env.randomization.randomizeMassUpper=0.051 \
+  task.env.randomization.randomizeCOM=false task.env.randomization.randomizeFriction=false \
+  task.env.randomization.randomizePDGains=false \
+  +task.env.debug.actions_file=debug/actions_zero.npy \
+  task.env.rerun.enabled=true task.env.rerun.record_every_n_steps=1 task.env.rerun.window_length_steps=400
+# modify cuboid to cylinder etc accordingly
+
+
+uv run python train.py task=LeapHandRot test=true headless=true \
+  wandb_activate=false log_to_sheet=false \
+  experiment=graspcheck_cylinder_train_s10 \
+  task.env.object.type=cylinder_train \
+  task.env.grasp_cache_name=leap_hand_in_cylinder_train \
+  'task.env.randomization.randomizeScaleList=[1.0]' \
+  task.env.numEnvs=64 \
+  task.env.forceScale=0 \
+  task.env.randomization.randomizeMassLower=0.05 task.env.randomization.randomizeMassUpper=0.051 \
+  task.env.randomization.randomizeCOM=false task.env.randomization.randomizeFriction=false \
+  task.env.randomization.randomizePDGains=false \
+  +task.env.debug.actions_file=debug/actions_zero.npy \
+  task.env.rerun.enabled=true task.env.rerun.record_every_n_steps=1 task.env.rerun.window_length_steps=400
+
+
+cd src/LEAP_Hand_Sim/leapsim
+cat > tools/run_overall_graspgen.sh <<'EOF'
+#!/bin/bash
+# Overall v5 data generation: size-equalized taxonomy, strict criterion
+# (3 fingers >=1N, proximal <=0.1N, grace 15), 40-col object-aware caches.
+set -u
+cd "$(dirname "$0")/.."
+
+# ── 0. archive all old caches and old gen/check runs ──
+STAMP=$(date +%Y%m%d)
+mkdir -p cache/pre_size_eq runs/archive_${STAMP}
+mv cache/leap_hand_in_{cuboid,cylinder,sphere}_* cache/_grasp_gen_status.json cache/pre_size_eq/ 2>/dev/null
+mv runs/graspgen_* runs/graspcheck_* runs/archive_${STAMP}/ 2>/dev/null
+rm -rf ../assets/cuboid/pilot   # stale pre-size-eq scratch family
+
+# ── 1. per family: generate all 5 scales, then graspcheck s1.0 ──
+for FAM in cuboid_train cuboid_heldout cylinder_train cylinder_heldout sphere_train sphere_heldout; do
+  uv run python tools/gen_grasp_caches.py --only $FAM --timeout 3600 \
+    --rerun-every 150 --grace-steps 15 --max-palm-force 0.1
+
+  uv run python train.py task=LeapHandRot test=true headless=true \
+    wandb_activate=false log_to_sheet=false \
+    experiment=graspcheck_${FAM}_s10 \
+    task.env.object.type=$FAM \
+    task.env.grasp_cache_name=leap_hand_in_$FAM \
+    'task.env.randomization.randomizeScaleList=[1.0]' \
+    +task.env.scale_list_jitter=0 \
+    task.env.numEnvs=64 task.env.forceScale=0 \
+    task.env.randomization.randomizeMassLower=0.05 task.env.randomization.randomizeMassUpper=0.051 \
+    task.env.randomization.randomizeCOM=false task.env.randomization.randomizeFriction=false \
+    task.env.randomization.randomizePDGains=false \
+    +task.env.debug.actions_file=debug/actions_zero_long.npy \
+    task.env.rerun.enabled=true task.env.rerun.record_every_n_steps=1 task.env.rerun.window_length_steps=400
+done
+echo "=== OVERALL GRASPGEN COMPLETE ==="
+EOF
+chmod +x tools/run_overall_graspgen.sh
+nohup tools/run_overall_graspgen.sh > tools/logs/overall_run.out 2>&1 &

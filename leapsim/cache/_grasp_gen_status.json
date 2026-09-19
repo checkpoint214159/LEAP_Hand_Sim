@@ -1,188 +1,274 @@
 {
+  "leap_hand_in_capsule_heldout_s09": {
+    "at": "2026-08-06T03:51:46.739359",
+    "cache": "leap_hand_in_capsule_heldout_grasp_50k_s09.npy",
+    "ok": true,
+    "seconds": 3699.9
+  },
+  "leap_hand_in_capsule_heldout_s095": {
+    "at": "2026-08-06T02:50:06.881695",
+    "cache": "leap_hand_in_capsule_heldout_grasp_50k_s095.npy",
+    "ok": true,
+    "seconds": 3675.9
+  },
+  "leap_hand_in_capsule_heldout_s10": {
+    "at": "2026-08-06T04:54:15.143779",
+    "cache": "leap_hand_in_capsule_heldout_grasp_50k_s10.npy",
+    "ok": true,
+    "seconds": 3748.4
+  },
+  "leap_hand_in_capsule_heldout_s105": {
+    "at": "2026-08-06T05:57:12.579341",
+    "cache": "leap_hand_in_capsule_heldout_grasp_50k_s105.npy",
+    "ok": true,
+    "seconds": 3777.4
+  },
+  "leap_hand_in_capsule_heldout_s11": {
+    "at": "2026-08-06T07:00:48.113140",
+    "cache": "leap_hand_in_capsule_heldout_grasp_50k_s11.npy",
+    "ok": true,
+    "seconds": 3815.5
+  },
+  "leap_hand_in_capsule_train_s09": {
+    "at": "2026-08-05T22:48:31.923066",
+    "cache": "leap_hand_in_capsule_train_grasp_50k_s09.npy",
+    "ok": true,
+    "seconds": 3600.5
+  },
+  "leap_hand_in_capsule_train_s095": {
+    "at": "2026-08-05T21:48:31.455818",
+    "cache": "leap_hand_in_capsule_train_grasp_50k_s095.npy",
+    "ok": true,
+    "seconds": 3600.5
+  },
+  "leap_hand_in_capsule_train_s10": {
+    "at": "2026-08-05T23:48:42.031013",
+    "cache": "leap_hand_in_capsule_train_grasp_50k_s10.npy",
+    "ok": true,
+    "seconds": 3610.1
+  },
+  "leap_hand_in_capsule_train_s105": {
+    "at": "2026-08-06T00:48:42.700450",
+    "cache": "leap_hand_in_capsule_train_grasp_50k_s105.npy",
+    "ok": true,
+    "seconds": 3600.7
+  },
+  "leap_hand_in_capsule_train_s11": {
+    "at": "2026-08-06T01:48:50.803585",
+    "cache": "leap_hand_in_capsule_train_grasp_50k_s11.npy",
+    "ok": true,
+    "seconds": 3608.1
+  },
+  "leap_hand_in_cone_heldout_s095_po": {
+    "at": "2026-08-07T05:54:07.597560",
+    "ok": true
+  },
+  "leap_hand_in_cone_train_s095_po": {
+    "at": "2026-08-06T15:20:29.967929",
+    "ok": true
+  },
+  "leap_hand_in_cone_train_s09_po": {
+    "at": "2026-08-06T19:36:04.347539",
+    "ok": true
+  },
+  "leap_hand_in_cone_train_s105_po": {
+    "at": "2026-08-06T23:54:03.954901",
+    "ok": true
+  },
+  "leap_hand_in_cone_train_s10_po": {
+    "at": "2026-08-06T11:14:10.219188",
+    "ok": true
+  },
+  "leap_hand_in_cone_train_s11_po": {
+    "at": "2026-08-07T03:54:06.053185",
+    "ok": true
+  },
+  "leap_hand_in_cuboid_denseheldout_s10_po": {
+    "at": "2026-07-25T03:03:10.819175",
+    "ok": true
+  },
+  "leap_hand_in_cuboid_densetrain_s10_po": {
+    "at": "2026-07-25T07:09:42.287311",
+    "ok": true
+  },
   "leap_hand_in_cuboid_heldout_s09": {
-    "at": "2026-07-11T19:23:14.681705",
+    "at": "2026-07-18T11:05:30.853960",
     "cache": "leap_hand_in_cuboid_heldout_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 2198.2
+    "seconds": 585.5
   },
   "leap_hand_in_cuboid_heldout_s095": {
-    "at": "2026-07-11T18:46:36.452992",
+    "at": "2026-07-18T10:55:45.309303",
     "cache": "leap_hand_in_cuboid_heldout_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 2269.9
+    "seconds": 460.0
   },
   "leap_hand_in_cuboid_heldout_s10": {
-    "at": "2026-07-11T20:01:44.303538",
+    "at": "2026-07-18T11:12:13.523513",
     "cache": "leap_hand_in_cuboid_heldout_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 2309.6
+    "seconds": 402.7
   },
   "leap_hand_in_cuboid_heldout_s105": {
-    "at": "2026-07-11T20:41:01.541704",
+    "at": "2026-07-18T11:17:59.201046",
     "cache": "leap_hand_in_cuboid_heldout_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 2357.2
+    "seconds": 345.7
   },
   "leap_hand_in_cuboid_heldout_s11": {
-    "at": "2026-07-11T21:19:52.651307",
+    "at": "2026-07-18T11:22:51.449439",
     "cache": "leap_hand_in_cuboid_heldout_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2331.1
-  },
-  "leap_hand_in_cuboid_pilot_s10": {
-    "at": "2026-07-16T21:03:55.960131",
-    "cache": "leap_hand_in_cuboid_pilot_grasp_50k_s10.npy",
-    "ok": true,
-    "seconds": 362.2
+    "seconds": 292.2
   },
   "leap_hand_in_cuboid_train_s09": {
-    "at": "2026-07-11T22:32:33.479451",
+    "at": "2026-07-18T10:28:03.977005",
     "cache": "leap_hand_in_cuboid_train_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 2161.7
+    "seconds": 350.1
   },
   "leap_hand_in_cuboid_train_s095": {
-    "at": "2026-07-11T21:56:31.749147",
+    "at": "2026-07-18T10:22:13.853396",
     "cache": "leap_hand_in_cuboid_train_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 2199.1
+    "seconds": 319.4
   },
   "leap_hand_in_cuboid_train_s10": {
-    "at": "2026-07-17T22:07:30.919744",
+    "at": "2026-07-18T10:32:54.144516",
     "cache": "leap_hand_in_cuboid_train_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 270.1
+    "seconds": 290.2
   },
   "leap_hand_in_cuboid_train_s105": {
-    "at": "2026-07-11T23:47:22.568499",
+    "at": "2026-07-18T10:37:08.110248",
     "cache": "leap_hand_in_cuboid_train_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 2255.5
+    "seconds": 254.0
   },
   "leap_hand_in_cuboid_train_s11": {
-    "at": "2026-07-12T00:26:03.987300",
+    "at": "2026-07-18T10:41:09.556786",
     "cache": "leap_hand_in_cuboid_train_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2321.4
+    "seconds": 241.4
   },
   "leap_hand_in_cylinder_heldout_s09": {
-    "at": "2026-07-12T01:45:26.953829",
+    "at": "2026-07-18T12:31:17.300467",
     "cache": "leap_hand_in_cylinder_heldout_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 2351.5
+    "seconds": 575.0
   },
   "leap_hand_in_cylinder_heldout_s095": {
-    "at": "2026-07-12T01:06:15.494896",
+    "at": "2026-07-18T12:21:42.296658",
     "cache": "leap_hand_in_cylinder_heldout_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 2411.5
+    "seconds": 523.5
   },
   "leap_hand_in_cylinder_heldout_s10": {
-    "at": "2026-07-12T02:26:32.369347",
+    "at": "2026-07-18T12:38:44.343036",
     "cache": "leap_hand_in_cylinder_heldout_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 2465.4
+    "seconds": 447.0
   },
   "leap_hand_in_cylinder_heldout_s105": {
-    "at": "2026-07-12T03:07:31.461764",
+    "at": "2026-07-18T12:45:04.724365",
     "cache": "leap_hand_in_cylinder_heldout_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 2459.1
+    "seconds": 380.4
   },
   "leap_hand_in_cylinder_heldout_s11": {
-    "at": "2026-07-12T03:49:20.055185",
+    "at": "2026-07-18T12:50:41.402224",
     "cache": "leap_hand_in_cylinder_heldout_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2508.6
+    "seconds": 336.7
   },
   "leap_hand_in_cylinder_train_s09": {
-    "at": "2026-07-12T05:03:06.503814",
+    "at": "2026-07-18T11:47:00.998368",
     "cache": "leap_hand_in_cylinder_train_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 2200.9
+    "seconds": 567.1
   },
   "leap_hand_in_cylinder_train_s095": {
-    "at": "2026-07-12T04:26:25.648534",
+    "at": "2026-07-18T11:37:33.943324",
     "cache": "leap_hand_in_cylinder_train_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 2225.6
+    "seconds": 467.3
   },
   "leap_hand_in_cylinder_train_s10": {
-    "at": "2026-07-17T22:15:56.139174",
+    "at": "2026-07-18T11:54:15.458832",
     "cache": "leap_hand_in_cylinder_train_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 427.5
+    "seconds": 434.5
   },
   "leap_hand_in_cylinder_train_s105": {
-    "at": "2026-07-12T06:18:15.737773",
+    "at": "2026-07-18T12:00:36.044325",
     "cache": "leap_hand_in_cylinder_train_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 2266.9
+    "seconds": 380.6
   },
   "leap_hand_in_cylinder_train_s11": {
-    "at": "2026-07-12T06:56:15.136696",
+    "at": "2026-07-18T12:06:18.602014",
     "cache": "leap_hand_in_cylinder_train_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2279.4
+    "seconds": 342.6
   },
   "leap_hand_in_sphere_heldout_s09": {
-    "at": "2026-07-12T08:23:49.539703",
+    "at": "2026-07-18T14:14:19.295841",
     "cache": "leap_hand_in_sphere_heldout_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 2644.6
+    "seconds": 769.0
   },
   "leap_hand_in_sphere_heldout_s095": {
-    "at": "2026-07-12T07:39:44.929355",
+    "at": "2026-07-18T14:01:30.320009",
     "cache": "leap_hand_in_sphere_heldout_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 2609.8
+    "seconds": 614.7
   },
   "leap_hand_in_sphere_heldout_s10": {
-    "at": "2026-07-12T09:07:07.149989",
+    "at": "2026-07-18T14:22:12.355696",
     "cache": "leap_hand_in_sphere_heldout_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 2597.6
+    "seconds": 473.1
   },
   "leap_hand_in_sphere_heldout_s105": {
-    "at": "2026-07-12T09:50:24.807001",
+    "at": "2026-07-18T14:28:12.517664",
     "cache": "leap_hand_in_sphere_heldout_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 2597.7
+    "seconds": 360.2
   },
   "leap_hand_in_sphere_heldout_s11": {
-    "at": "2026-07-12T10:33:23.576388",
+    "at": "2026-07-18T14:33:04.982520",
     "cache": "leap_hand_in_sphere_heldout_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2578.8
+    "seconds": 292.5
   },
   "leap_hand_in_sphere_train_s09": {
-    "at": "2026-07-12T12:20:33.541457",
+    "at": "2026-07-18T13:23:12.480902",
     "cache": "leap_hand_in_sphere_train_grasp_50k_s09.npy",
     "ok": true,
-    "seconds": 3272.7
+    "seconds": 868.3
   },
   "leap_hand_in_sphere_train_s095": {
-    "at": "2026-07-12T11:26:00.870349",
+    "at": "2026-07-18T13:08:44.131107",
     "cache": "leap_hand_in_sphere_train_grasp_50k_s095.npy",
     "ok": true,
-    "seconds": 3157.3
+    "seconds": 681.0
   },
   "leap_hand_in_sphere_train_s10": {
-    "at": "2026-07-17T22:29:45.326378",
+    "at": "2026-07-18T13:32:04.855810",
     "cache": "leap_hand_in_sphere_train_grasp_50k_s10.npy",
     "ok": true,
-    "seconds": 753.3
+    "seconds": 532.4
   },
   "leap_hand_in_sphere_train_s105": {
-    "at": "2026-07-12T14:01:18.307000",
+    "at": "2026-07-18T13:38:55.865920",
     "cache": "leap_hand_in_sphere_train_grasp_50k_s105.npy",
     "ok": true,
-    "seconds": 3018.7
+    "seconds": 411.0
   },
   "leap_hand_in_sphere_train_s11": {
-    "at": "2026-07-12T14:49:54.816883",
+    "at": "2026-07-18T13:44:29.983944",
     "cache": "leap_hand_in_sphere_train_grasp_50k_s11.npy",
     "ok": true,
-    "seconds": 2916.5
+    "seconds": 334.1
   }
 }

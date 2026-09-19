@@ -9,3 +9,9 @@ isaacgym/
 *runs*
 *.log
 *.pth*
+*.out 
+# generated experiment outputs
+*.npz
+*.pid
+leapsim/tools/distill_data/
+leapsim/tools/logs/
